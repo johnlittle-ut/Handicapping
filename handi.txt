@@ -1,0 +1,730 @@
+(function launchTwinSpiresVariableInspectorV16() {
+  let currentZoom = 1.0;
+
+  function applyZoom() {
+    let overlay = document.getElementById('ts-model-overlay');
+    if (overlay) {
+      overlay.style.transform = `scale(${currentZoom})`;
+      overlay.style.transformOrigin = 'top right';
+      let label = document.getElementById('ts-zoom-label');
+      if (label) label.innerText = `${Math.round(currentZoom * 100)}%`;
+    }
+  }
+
+  function resetRaceData() {
+    cachedHorsesMap = {};
+    cachedScratchedMap = {};
+    cachedStatsObj = null;
+    cachedStatsCsv = "Awaiting Race Stats Data...";
+  }
+
+  if (!window.__tsEventListenerAttached) {
+    document.addEventListener('click', function(e) {
+      if (!e.target) return;
+      if (e.target.id === 'ts-zoom-in') {
+        currentZoom = Math.min(2.0, Math.round((currentZoom + 0.1) * 10) / 10);
+        applyZoom();
+      } else if (e.target.id === 'ts-zoom-out') {
+        currentZoom = Math.max(0.5, Math.round((currentZoom - 0.1) * 10) / 10);
+        applyZoom();
+      } else if (e.target.id === 'ts-zoom-reset') {
+        currentZoom = 1.0;
+        applyZoom();
+      } else if (e.target.id === 'ts-refresh-btn') {
+        let urlData = parseTwinSpiresUrl();
+        if (urlData) {
+          cachedTrackName = urlData.trackName;
+          cachedRaceNum = urlData.raceNum;
+        }
+        resetRaceData();
+        updateOverlay();
+      }
+    });
+    window.__tsEventListenerAttached = true;
+  }
+
+  function parseTwinSpiresUrl(url = window.location.href) {
+    const regex = /\/program\/[^\/]+\/([a-z0-9-]+)\/([a-z0-9]+)\/([a-z0-9]+)\/(\d+)/i;
+    const match = url.match(regex);
+    if (match) {
+      let trackSlug = match[1];
+      let trackCode = match[2];
+      let breed = match[3];
+      let raceNum = parseInt(match[4], 10);
+      let trackName = trackSlug.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+      return { trackName, trackCode, breed, raceNum };
+    }
+    return null;
+  }
+
+  let cachedTrackName = "";
+  let cachedRaceNum = "";
+  let cachedBreed = "Thoroughbred";
+  let cachedHorsesMap = {}; 
+  let cachedScratchedMap = {};
+  let cachedStatsObj = null;
+  let cachedStatsCsv = "Awaiting Race Stats Data...";
+
+  const ROUTE_IGNORE_LIST = [
+    'bet', 'bets', 'betting', 'race', 'races', 'handicapping', 
+    'today', 'summary', 'entries', 'results', 'overview', 
+    'brisnet', 'track', 'tracks', 'speed', 'pace', 'class', 'program', 'classic'
+  ];
+
+  function getActiveTrackName(payloadObj) {
+    let urlData = parseTwinSpiresUrl();
+    if (urlData && urlData.trackName) return urlData.trackName;
+
+    if (payloadObj) {
+      let candidate = payloadObj.trackName || payloadObj.track_name || payloadObj.trackTitle || payloadObj.trackCode || payloadObj.track;
+      if (candidate && String(candidate).trim() !== '' && !String(candidate).includes('Awaiting')) {
+        let candStr = String(candidate).trim();
+        if (!ROUTE_IGNORE_LIST.includes(candStr.toLowerCase())) return candStr;
+      }
+    }
+
+    if (cachedTrackName && !cachedTrackName.includes('Awaiting') && !ROUTE_IGNORE_LIST.includes(cachedTrackName.toLowerCase())) {
+      return cachedTrackName;
+    }
+
+    let headerElem = document.querySelector('h1, header, [class*="track-name"], [class*="trackName"], .track-title');
+    if (headerElem && headerElem.innerText.trim().length > 0) {
+      let domText = headerElem.innerText.trim().split('\n')[0];
+      if (!ROUTE_IGNORE_LIST.includes(domText.toLowerCase()) && domText.length > 2) return domText;
+    }
+    return "Unknown Track";
+  }
+
+  function getActiveRaceNum(payloadRace) {
+    let urlData = parseTwinSpiresUrl();
+    if (urlData && urlData.raceNum) return urlData.raceNum;
+    if (payloadRace) return payloadRace;
+    return cachedRaceNum || 1;
+  }
+
+  function getVal(obj, keys, defaultVal = 0) {
+    if (!obj) return defaultVal;
+    let keyList = Array.isArray(keys) ? keys : [keys];
+    for (let k of keyList) {
+      if (obj[k] !== undefined && obj[k] !== null) {
+        let val = obj[k];
+        if (typeof val === 'number') return val;
+        let cleaned = String(val).replace('%', '').trim();
+        let parsed = parseFloat(cleaned);
+        if (!isNaN(parsed)) return parsed;
+      }
+    }
+    return defaultVal;
+  }
+
+  function getStr(obj, keys, defaultVal = '') {
+    if (!obj) return defaultVal;
+    let keyList = Array.isArray(keys) ? keys : [keys];
+    for (let k of keyList) {
+      if (obj[k] !== undefined && obj[k] !== null) {
+        return String(obj[k]).trim();
+      }
+    }
+    return defaultVal;
+  }
+
+  function parseOddsToDecimal(oddsVal) {
+    if (!oddsVal) return NaN;
+    let s = String(oddsVal).trim();
+    if (!s || s.toUpperCase() === 'NAN') return NaN;
+    try {
+      if (s.includes('/')) {
+        let parts = s.split('/');
+        return parseFloat(parts[0]) / parseFloat(parts[1]);
+      }
+      return parseFloat(s);
+    } catch (e) {
+      return NaN;
+    }
+  }
+
+  function findStatsObject(obj, depth = 0) {
+    if (!obj || typeof obj !== 'object' || depth > 5) return null;
+    if (obj.meetCountRaces !== undefined || obj.meetRaces !== undefined || obj.meetSpeedBias !== undefined || obj.weekCountRaces !== undefined) {
+      return obj;
+    }
+    if (Array.isArray(obj)) {
+      for (let item of obj) {
+        let found = findStatsObject(item, depth + 1);
+        if (found) return found;
+      }
+    } else {
+      for (let key in obj) {
+        if (typeof obj[key] === 'object' && obj[key] !== null) {
+          let found = findStatsObject(obj[key], depth + 1);
+          if (found) return found;
+        }
+      }
+    }
+    return null;
+  }
+
+  function findRunnersArray(obj, depth = 0) {
+    if (!obj || typeof obj !== 'object' || depth > 5) return null;
+    if (Array.isArray(obj) && obj.length > 0 && (obj[0].programNumber !== undefined || obj[0].priorRunStyle !== undefined || obj[0].averageSpeed !== undefined)) {
+      return obj;
+    }
+    let candidateKeys = ['runners', 'entries', 'starts', 'horses'];
+    for (let k of candidateKeys) {
+      if (Array.isArray(obj[k]) && obj[k].length > 0) return obj[k];
+    }
+    for (let key in obj) {
+      if (typeof obj[key] === 'object' && obj[key] !== null) {
+        let found = findRunnersArray(obj[key], depth + 1);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  function parseAndMergeRunnerRow(r) {
+    if (!r || typeof r !== 'object') return null;
+
+    let rawName = getStr(r, ['name', 'horseName'], '').replace(/"/g, '');
+    let prog = getStr(r, ['programNumber', 'postPosition'], '1');
+    let post = getVal(r, ['postPosition', 'programNumber'], parseInt(prog) || 1);
+
+    let isScratched = r.scratched === true || 
+                      String(r.scratched).toLowerCase() === 'true' || 
+                      r.isScratched === true || 
+                      getStr(r, ['scratchStatus', 'status'], '').toLowerCase() === 'scratched';
+
+    if (isScratched) {
+      delete cachedHorsesMap[prog];
+      cachedScratchedMap[prog] = rawName || prog;
+      return null;
+    } else {
+      delete cachedScratchedMap[prog];
+    }
+
+    let freshData = {
+      PROGRAM: prog,
+      HORSE_NAME: rawName ? `"${rawName}"` : '""',
+      POST: post,
+      ML_ODDS: getStr(r, ['morningLineOdds', 'mlOdds'], ''),
+      LIVE_ODDS: getStr(r, ['liveOdds', 'currentOdds', 'odds'], ''),
+      RUN_STYLE: getStr(r, ['priorRunStyle', 'runStyle'], '').toUpperCase(),
+      RUN_STYLE_PTS: getVal(r, ['speedPoints', 'quirinSpeedPoints'], 0),
+      PRM_PWR: getVal(r, ['primePower', 'brisnetPrimePower'], 0),
+      AVG_SPD: getVal(r, ['averageSpeed', 'avgSpeed'], 0),
+      BACK_SPD: getVal(r, ['bestSpeedAtDistance', 'bestSpeedAtDist'], 0),
+      SPD_LR: getVal(r, ['speedLastRace', 'lastRaceSpeed'], 0),
+      AVG_CLS: getVal(r, ['averageClass', 'avgClass', 'classRating'], 0),
+      LAST_CLS: getVal(r, ['lastClass'], 0),
+      AVG_DIST_SPD: getVal(r, ['averageSpeedAtDistanceSurface', 'averageSpeedAtDistance'], 0),
+      BEST_SPD: getVal(r, ['bestSpeedDistance', 'bestSpeedAtDistance', 'bestSpeed'], 0),
+      W_JKY: getVal(r, ['jockeyWinPercent', 'jockeyWinPct'], 0),
+      W_TRN: getVal(r, ['trainerWinPercent', 'trainerWinPct'], 0),
+      E1: getVal(r, ['averagePaceE1', 'avgPaceE1', 'e1Pace'], 0),
+      E2: getVal(r, ['averagePaceE2', 'avgPaceE2', 'e2Pace'], 0),
+      LP: getVal(r, ['averagePaceLP', 'avgPaceLP', 'latePace'], 0),
+      DAYS_OFF: getVal(r, ['daysOff', 'daysSinceLastRace'], 0)
+    };
+
+    let existing = cachedHorsesMap[prog];
+    if (!existing) {
+      cachedHorsesMap[prog] = freshData;
+      return cachedHorsesMap[prog];
+    }
+
+    for (let key in freshData) {
+      let val = freshData[key];
+      if (key === 'HORSE_NAME') {
+        if (val !== '""' && val !== '"Unknown"') existing[key] = val;
+      } else if (typeof val === 'number') {
+        if (val !== 0 || existing[key] === undefined) existing[key] = val;
+      } else if (typeof val === 'string') {
+        if ((val !== '' && val !== 'N/A' && val !== 'UNDEFINED') || !existing[key]) existing[key] = val;
+      }
+    }
+    return existing;
+  }
+
+  function getFormattedHorsesCsv() {
+    let keys = Object.keys(cachedHorsesMap);
+    if (keys.length === 0) return "Awaiting Active Horse Data...";
+    let sorted = keys.map(k => cachedHorsesMap[k]).sort((a, b) => {
+      let numA = parseInt(String(a.PROGRAM).replace(/\D/g, ''), 10) || 0;
+      let numB = parseInt(String(b.PROGRAM).replace(/\D/g, ''), 10) || 0;
+      return numA - numB;
+    });
+    return sorted.map(h => Object.values(h).join(',')).join('\n');
+  }
+
+  function parseStatsRows(s) {
+    let urlData = parseTwinSpiresUrl();
+    let rawBreed = getStr(s, 'breedType', urlData ? urlData.breed : 'TB');
+    let breed = rawBreed.toUpperCase() === 'TB' ? 'Thoroughbred' : rawBreed;
+    cachedBreed = breed;
+    let track = getActiveTrackName(s);
+    let raceNum = getActiveRaceNum(s.raceNumber);
+
+    function formatBias(val) {
+      let num = parseFloat(val) || 0;
+      return num > 1.0 ? num / 100.0 : num;
+    }
+
+    let meetRow = {
+      BREED: breed,
+      TRACK: `"${track}"`,
+      RACE_NUMBER: raceNum,
+      STAT_SET: 'Meet',
+      RACES: getVal(s, ['meetCountRaces', 'meetRaces', 'meetCount']),
+      SPEED_BIAS: formatBias(getVal(s, 'meetSpeedBias')),
+      IV_RAIL: getVal(s, 'meetPost1Impact'),
+      IV_1to3: getVal(s, 'meetPost2Impact'),
+      IV_4to7: getVal(s, 'meetPost3Impact'),
+      IV_8plus: getVal(s, 'meetPost4Impact'),
+      IV_E: getVal(s, 'meetRs1Impact'),
+      IV_EP: getVal(s, 'meetRs2Impact'),
+      IV_P: getVal(s, 'meetRs3Impact'),
+      IV_S: getVal(s, 'meetRs4Impact')
+    };
+
+    let weekRow = {
+      BREED: breed,
+      TRACK: `"${track}"`,
+      RACE_NUMBER: raceNum,
+      STAT_SET: 'Week',
+      RACES: getVal(s, ['weekCountRaces', 'weekRaces', 'weekCount']),
+      SPEED_BIAS: formatBias(getVal(s, 'weekSpeedBias')),
+      IV_RAIL: getVal(s, 'weekPost1Impact'),
+      IV_1to3: getVal(s, 'weekPost2Impact'),
+      IV_4to7: getVal(s, 'weekPost3Impact'),
+      IV_8plus: getVal(s, 'weekPost4Impact'),
+      IV_E: getVal(s, 'weekRs1Impact'),
+      IV_EP: getVal(s, 'weekRs2Impact'),
+      IV_P: getVal(s, 'weekRs3Impact'),
+      IV_S: getVal(s, 'weekRs4Impact')
+    };
+    return [meetRow, weekRow];
+  }
+
+  function calculateModelOutput() {
+    let runnerKeys = Object.keys(cachedHorsesMap);
+    if (runnerKeys.length < 3) {
+      return {
+        ruleAppliedMsg: "Awaiting field data...",
+        leaderboard: [],
+        gaps: [],
+        wagerRecs: { optionA: "N/A", optionB: "N/A", optionC: null, scenario: "Insufficient Data" }
+      };
+    }
+
+    let cleanTrack = getActiveTrackName();
+    let cleanBreed = cachedBreed || "Thoroughbred";
+
+    let weekRaces = 0, meetRaces = 100;
+    let weekBias = 0, meetBias = 0;
+    let weekIV = { RAIL: 1.0, "1-3": 1.0, "4-7": 1.0, "8+": 1.0, E: 1.0, EP: 1.0, P: 1.0, S: 1.0 };
+    let meetIV = { RAIL: 1.0, "1-3": 1.0, "4-7": 1.0, "8+": 1.0, E: 1.0, EP: 1.0, P: 1.0, S: 1.0 };
+
+    if (cachedStatsObj) {
+      let s = cachedStatsObj;
+      weekRaces = getVal(s, ['weekCountRaces', 'weekRaces'], 0);
+      meetRaces = getVal(s, ['meetCountRaces', 'meetRaces', 'meetCount'], 100);
+
+      function normB(v) { let n = parseFloat(v) || 0; return n > 1.0 ? n / 100.0 : n; }
+      weekBias = normB(getVal(s, 'weekSpeedBias'));
+      meetBias = normB(getVal(s, 'meetSpeedBias'));
+
+      weekIV = {
+        RAIL: getVal(s, 'weekPost1Impact', 1.0),
+        "1-3": getVal(s, 'weekPost2Impact', 1.0),
+        "4-7": getVal(s, 'weekPost3Impact', 1.0),
+        "8+": getVal(s, 'weekPost4Impact', 1.0),
+        E: getVal(s, 'weekRs1Impact', 1.0),
+        EP: getVal(s, 'weekRs2Impact', 1.0),
+        P: getVal(s, 'weekRs3Impact', 1.0),
+        S: getVal(s, 'weekRs4Impact', 1.0)
+      };
+
+      meetIV = {
+        RAIL: getVal(s, 'meetPost1Impact', 1.0),
+        "1-3": getVal(s, 'meetPost2Impact', 1.0),
+        "4-7": getVal(s, 'meetPost3Impact', 1.0),
+        "8+": getVal(s, 'meetPost4Impact', 1.0),
+        E: getVal(s, 'meetRs1Impact', 1.0),
+        EP: getVal(s, 'meetRs2Impact', 1.0),
+        P: getVal(s, 'meetRs3Impact', 1.0),
+        S: getVal(s, 'meetRs4Impact', 1.0)
+      };
+    }
+
+    let wWeek = 0.0, wMeet = 1.0;
+    let ruleAppliedMsg = "";
+
+    if (weekRaces < 15) {
+      wWeek = 0.00; wMeet = 1.00;
+      ruleAppliedMsg = `[Rule Applied] Using 100% Meet stats (Week sample too small: ${Math.round(weekRaces)} < 15 races)`;
+    } else {
+      wWeek = 0.65; wMeet = 0.35;
+      ruleAppliedMsg = `[Rule Applied] Blending 65% Week / 35% Meet (Week sample sufficient: ${Math.round(weekRaces)} >= 15 races)`;
+    }
+
+    let activeSpeedBias = (wWeek * weekBias) + (wMeet * meetBias);
+    let postIvMapping = {
+      "RAIL": Math.round(((wWeek * weekIV.RAIL) + (wMeet * meetIV.RAIL)) * 100) / 100,
+      "1-3": Math.round(((wWeek * weekIV["1-3"]) + (wMeet * meetIV["1-3"])) * 100) / 100,
+      "4-7": Math.round(((wWeek * weekIV["4-7"]) + (wMeet * meetIV["4-7"])) * 100) / 100,
+      "8+": Math.round(((wWeek * weekIV["8+"]) + (wMeet * meetIV["8+"])) * 100) / 100
+    };
+
+    let runStyleIvMapping = {
+      "E": Math.round(((wWeek * weekIV.E) + (wMeet * meetIV.E)) * 100) / 100,
+      "E/P": Math.round(((wWeek * weekIV.EP) + (wMeet * meetIV.EP)) * 100) / 100,
+      "P": Math.round(((wWeek * weekIV.P) + (wMeet * meetIV.P)) * 100) / 100,
+      "S": Math.round(((wWeek * weekIV.S) + (wMeet * meetIV.S)) * 100) / 100
+    };
+
+    // V16 UPDATED WEIGHTS: Dampened W_Market to 0.03 across all profiles
+    const weightsDict = {
+      'Thoroughbred': { W_Speed: 0.18, W_Power: 0.10, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.06, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Course: 0.02, W_Market: 0.03 },
+      'Harness': { W_Speed: 0.16, W_Power: 0.07, W_Class: 0.13, W_Distance: 0.04, W_Driver: 0.18, W_Trainer: 0.06, W_Early: 0.18, W_Finish: 0.08, W_Recency: 0.04, W_Course: 0.03, W_Market: 0.03 },
+      'Quarter Horse': { W_Speed: 0.26, W_Power: 0.10, W_Class: 0.09, W_Distance: 0.02, W_Driver: 0.07, W_Trainer: 0.07, W_Early: 0.34, W_Finish: 0.00, W_Recency: 0.02, W_Course: 0.00, W_Market: 0.03 },
+      'Churchill Downs': { W_Speed: 0.16, W_Power: 0.09, W_Class: 0.17, W_Distance: 0.11, W_Driver: 0.08, W_Trainer: 0.08, W_Early: 0.11, W_Finish: 0.12, W_Recency: 0.03, W_Course: 0.02, W_Market: 0.03 }
+    };
+
+    let activeWeights = Object.assign({}, cleanTrack === 'Churchill Downs' ? weightsDict['Churchill Downs'] : (weightsDict[cleanBreed] || weightsDict['Thoroughbred']));
+
+    let activeMeetCount = meetRaces;
+    let sampleScaleFactor = 0.0;
+    if (activeMeetCount < 6) sampleScaleFactor = 0.0;
+    else if (activeMeetCount <= 15) sampleScaleFactor = 0.10;
+    else sampleScaleFactor = 1.00;
+
+    let biasDecimal = activeSpeedBias > 1.0 ? activeSpeedBias / 100.0 : activeSpeedBias;
+    if (biasDecimal > 0.55) {
+      let rawEarlyBoost = (biasDecimal - 0.55) * 0.5;
+      activeWeights.W_Early += (rawEarlyBoost * sampleScaleFactor);
+    }
+
+    let postIvMultiplier = 6.0, styleIvMultiplier = 6.0;
+    if (cleanBreed === 'Harness') { postIvMultiplier = 7.0; styleIvMultiplier = 7.0; }
+    else if (cleanBreed === 'Quarter Horse') { postIvMultiplier = 4.0; styleIvMultiplier = 5.0; }
+
+    function getPostCat(postVal) {
+      let p = parseInt(postVal, 10);
+      if (p === 1) return "RAIL";
+      if (p >= 1 && p <= 3) return "1-3";
+      if (p >= 4 && p <= 7) return "4-7";
+      if (p >= 8) return "8+";
+      return "1-3";
+    }
+
+    function calcPostBonus(cat) {
+      if (activeMeetCount < 15) return 0.0;
+      let iv = postIvMapping[cat] || 1.0;
+      let diff = Math.max(0.0, iv - 1.0);
+      return diff >= 0.03 ? Math.round(Math.min(5.0, diff * postIvMultiplier) * 100) / 100 : 0.0;
+    }
+
+    function calcStyleBonus(code, pts) {
+      if (activeMeetCount < 15) return 0.0;
+      let iv = runStyleIvMapping[code] || 1.0;
+      let diff = Math.max(0.0, iv - 1.0);
+      if (diff >= 0.03) {
+        let ptsFactor = Math.min(Math.max(parseFloat(pts) / 8.0, 0.0), 1.0);
+        return Math.round(Math.min(5.0, diff * styleIvMultiplier * ptsFactor) * 100) / 100;
+      }
+      return 0.0;
+    }
+
+    let runners = Object.values(cachedHorsesMap).map(h => Object.assign({}, h));
+
+    let numCols = ['PRM_PWR', 'AVG_SPD', 'BACK_SPD', 'SPD_LR', 'AVG_CLS', 'LAST_CLS', 'AVG_DIST_SPD', 'BEST_SPD', 'W_JKY', 'W_TRN', 'E1', 'E2', 'LP', 'DAYS_OFF'];
+    numCols.forEach(col => {
+      let validVals = runners.map(r => parseFloat(r[col]) || 0).filter(v => v > 0);
+      let avg = validVals.length > 0 ? validVals.reduce((a, b) => a + b, 0) / validVals.length : 0.0;
+      runners.forEach(r => {
+        let v = parseFloat(r[col]) || 0;
+        if (v <= 0) r[col] = Math.round(avg * 10) / 10;
+      });
+    });
+
+    runners.forEach(r => {
+      let mlDec = parseOddsToDecimal(r.ML_ODDS);
+      let liveDec = parseOddsToDecimal(r.LIVE_ODDS);
+      let finalOddsDec = !isNaN(liveDec) && liveDec > 0 ? liveDec : mlDec;
+
+      let avgDist = parseFloat(r.AVG_DIST_SPD) || 0;
+      let spdLr = parseFloat(r.SPD_LR) || 0;
+      let avgSpd = parseFloat(r.AVG_SPD) || 0;
+      let cSpeed = 0;
+      if (avgDist > 0 && spdLr > 0) cSpeed = (0.70 * avgDist) + (0.30 * spdLr);
+      else if (spdLr > 0) cSpeed = spdLr;
+      else if (avgDist > 0) cSpeed = avgDist;
+      else cSpeed = avgSpd;
+
+      let cPower = parseFloat(r.PRM_PWR) || 0;
+
+      let avgCls = parseFloat(r.AVG_CLS) || 0;
+      let lastCls = parseFloat(r.LAST_CLS) || 0;
+      let cClass = avgCls > 0 ? avgCls : (lastCls > 0 ? lastCls : 0);
+
+      let bestSpd = parseFloat(r.BEST_SPD) || parseFloat(r.BACK_SPD) || 0;
+      let cDist = avgDist > 0 ? avgDist : (bestSpd > 0 ? bestSpd : 0);
+
+      let cDriver = parseFloat(r.W_JKY) || 0;
+      let cTrainer = parseFloat(r.W_TRN) || 0;
+
+      let e1 = parseFloat(r.E1) || 0;
+      let e2 = parseFloat(r.E2) || 0;
+      let cEarly = (e1 > 0 && e2 > 0) ? (0.50 * e1 + 0.50 * e2) : (e2 > 0 ? e2 : e1);
+
+      let cFinish = parseFloat(r.LP) || 0;
+
+      let days = parseFloat(r.DAYS_OFF) || 0;
+      let cRecency = 75.0;
+      if (days >= 14 && days <= 45) cRecency = 100.0;
+      else if (days < 14) cRecency = 85.0;
+      else if (days >= 46 && days <= 90) cRecency = 70.0;
+      else if (days > 90) cRecency = 50.0;
+
+      let cCourse = 0.0;
+      let cMarket = !isNaN(finalOddsDec) && finalOddsDec > 0 ? (1.0 / (finalOddsDec + 1.0)) * 100.0 : 0.0;
+
+      let baseSkill = 
+        (cSpeed * activeWeights.W_Speed) +
+        (cPower * activeWeights.W_Power) +
+        (cClass * activeWeights.W_Class) +
+        (cDist * activeWeights.W_Distance) +
+        (cDriver * activeWeights.W_Driver) +
+        (cTrainer * activeWeights.W_Trainer) +
+        (cEarly * activeWeights.W_Early) +
+        (cFinish * activeWeights.W_Finish) +
+        (cRecency * activeWeights.W_Recency) +
+        (cCourse * activeWeights.W_Course) +
+        (cMarket * activeWeights.W_Market);
+
+      let postCat = getPostCat(r.POST);
+      let postBonus = calcPostBonus(postCat);
+      let styleBonus = calcStyleBonus(r.RUN_STYLE, r.RUN_STYLE_PTS);
+
+      r.BASE_SKILL = Math.round(baseSkill * 100) / 100;
+      r.POST_BONUS = postBonus;
+      r.STYLE_BONUS = styleBonus;
+      r.FINAL_SCORE = Math.round((baseSkill + postBonus + styleBonus) * 100) / 100;
+    });
+
+    runners.sort((a, b) => b.FINAL_SCORE - a.FINAL_SCORE);
+    runners.forEach((r, idx) => { r.RANK = idx + 1; });
+
+    let topField = runners.slice(0, 5);
+    let s1 = topField[0] ? topField[0].FINAL_SCORE : 0;
+    let s2 = topField[1] ? topField[1].FINAL_SCORE : 0;
+    let s3 = topField[2] ? topField[2].FINAL_SCORE : 0;
+    let s4 = topField[3] ? topField[3].FINAL_SCORE : 0;
+    let s5 = topField[4] ? topField[4].FINAL_SCORE : 0;
+
+    let gap12 = Math.round((s1 - s2) * 100) / 100;
+    let gap23 = Math.round((s2 - s3) * 100) / 100;
+    let gap34 = Math.round((s3 - s4) * 100) / 100;
+    let gap13 = Math.round((s1 - s3) * 100) / 100;
+    let gap14 = Math.round((s1 - s4) * 100) / 100;
+
+    let p1 = topField[0] ? topField[0].PROGRAM : "N/A";
+    let p2 = topField[1] ? topField[1].PROGRAM : "N/A";
+    let p3 = topField[2] ? topField[2].PROGRAM : "N/A";
+    let p4 = topField[3] ? topField[3].PROGRAM : "N/A";
+
+    let scenario = "", optionA = "", optionB = "", optionC = null;
+
+    // V16 UPDATED DECISION THRESHOLDS (8.0pt dominant gap / 5.0pt pass rule)
+    if (gap14 < 5.0 && runners.length >= 4) {
+      scenario = "Ultra-Tight Field / High Chaos (Top 4 within 5.0 pts)";
+      optionA = `PASS / NO BET (Or Value WIN Wager on highest live odds among #${p1}, #${p2}, #${p3})`;
+      optionB = `3-Horse Exacta Box: #${p1}, #${p2}, #${p3} (6 combos / low cost)`;
+    } else if (gap12 >= 8.0) {
+      scenario = `Dominant Standout (#${p1} holds >=8.0 pt lead)`;
+      optionA = `WIN Wager on #${p1}`;
+      optionB = (gap23 < 4.0 && gap34 >= 4.0) 
+        ? `Straight Exacta: #${p1} / #${p2}, #${p3}`
+        : `Straight Exacta: #${p1} / #${p2} (Or Exacta Key: #${p1} / #${p2}, #${p3}, #${p4})`;
+    } else if (gap12 < 8.0 && gap23 >= 4.0) {
+      scenario = `Competitive Top Duo (#${p1} & #${p2} separated from field)`;
+      optionA = `WIN Wager on #${p1} (Or PLACE Wager on #${p2})`;
+      optionB = `Exacta Box: #${p1}, #${p2}`;
+    } else if (gap13 < 4.0) {
+      scenario = `Volatile Top Group (Top 3 within 4.0 pts: #${p1}, #${p2}, #${p3})`;
+      optionA = `PLACE / SHOW Wager on highest live odds among #${p1}, #${p2}, #${p3}`;
+      optionB = `Trifecta Box: #${p1}, #${p2}, #${p3} (6 combos / $3.00 total at $0.50 base)`;
+    } else {
+      scenario = "Standard Competitive Field";
+      optionA = `WIN / PLACE Wager on #${p1}`;
+      optionB = `Straight Exacta Wheel: #${p1} / #${p2}, #${p3}`;
+    }
+
+    if (cleanTrack === "Churchill Downs" && runners.length >= 6) {
+      let oddSum = 0, evenSum = 0;
+      topField.forEach(r => {
+        let pNum = parseInt(r.PROGRAM.replace(/\D/g, ''), 10);
+        if (!isNaN(pNum)) {
+          if (pNum % 2 !== 0) oddSum += r.FINAL_SCORE;
+          else evenSum += r.FINAL_SCORE;
+        }
+      });
+      let pref = oddSum >= evenSum ? "ODD" : "EVEN";
+      optionC = `CHURCHILL ODD/EVEN WAGER: Bet [${pref}] (Score Weight: ${Math.max(oddSum, evenSum).toFixed(2)} vs ${Math.min(oddSum, evenSum).toFixed(2)})`;
+    }
+
+    return {
+      ruleAppliedMsg,
+      leaderboard: runners,
+      gaps: { gap12, gap23, gap34, gap13, gap14 },
+      wagerRecs: { scenario, optionA, optionB, optionC }
+    };
+  }
+
+  function updateOverlay() {
+    let existing = document.getElementById('ts-model-overlay');
+    if (!existing) {
+      existing = document.createElement('div');
+      existing.id = 'ts-model-overlay';
+      existing.style.cssText = 'position:fixed;top:40px;right:20px;z-index:999999;background:#111827;color:#ffffff;padding:16px;border-radius:8px;box-shadow:0 10px 25px rgba(0,0,0,0.5);font-family:monospace;min-width:440px;max-width:620px;max-height:88vh;overflow-y:auto;border:2px solid #3b82f6;font-size:11px;';
+      document.body.appendChild(existing);
+    }
+
+    let trackDisplay = getActiveTrackName().toUpperCase().replace(/"/g, '');
+    let raceDisplay = String(getActiveRaceNum()).replace(/[^0-9]/g, '');
+    let activeStartersCount = Object.keys(cachedHorsesMap).length;
+    let scratchedHorsesCount = Object.keys(cachedScratchedMap).length;
+    let currentDate = new Date().toISOString().split('T')[0];
+
+    let modelRes = calculateModelOutput();
+
+    let leaderboardHtml = modelRes.leaderboard.map(h => {
+      let nameStr = h.HORSE_NAME.replace(/"/g, '');
+      return `R${h.RANK} | #${h.PROGRAM} ${nameStr} | Final: ${h.FINAL_SCORE.toFixed(2)} = Base: ${h.BASE_SKILL.toFixed(2)} + Post: ${h.POST_BONUS.toFixed(2)} + Style: ${h.STYLE_BONUS.toFixed(2)}`;
+    }).join('\n');
+
+    let gapHtml = modelRes.leaderboard.slice(0, 5).map((h, i) => {
+      let nameStr = h.HORSE_NAME.replace(/"/g, '');
+      let gapStr = i === 0 ? "(Leader)" : `(Gap to #1: -${(modelRes.leaderboard[0].FINAL_SCORE - h.FINAL_SCORE).toFixed(2)})`;
+      return `  Rank ${i+1}: #${h.PROGRAM} ${nameStr} — Score: ${h.FINAL_SCORE.toFixed(2)} ${gapStr}`;
+    }).join('\n');
+
+    existing.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #3b82f6;padding-bottom:6px;margin-bottom:10px;">
+        <div style="color:#60a5fa;font-weight:bold;font-size:12px;">
+          📍 ${trackDisplay} — RACE #${raceDisplay} | ${currentDate}<br/>
+          <span style="color:#9ca3af;font-size:10px;">${activeStartersCount} Active Starters | ${scratchedHorsesCount} Scratched</span>
+        </div>
+        
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button id="ts-refresh-btn" title="Clear Cache & Reset Race" style="background:#2563eb;color:#ffffff;border:1px solid #3b82f6;border-radius:4px;padding:2px 8px;cursor:pointer;font-weight:bold;font-size:11px;">🔄 Reset</button>
+
+          <div style="display:flex;align-items:center;gap:3px;background:#1f2937;padding:3px 6px;border-radius:4px;border:1px solid #374151;user-select:none;">
+            <button id="ts-zoom-out" title="Zoom Out" style="background:#374151;color:#60a5fa;border:1px solid #4b5563;border-radius:3px;padding:1px 6px;cursor:pointer;font-weight:bold;font-size:12px;">-</button>
+            <span id="ts-zoom-label" id="ts-zoom-reset" title="Click to Reset" style="color:#9ca3af;font-size:10px;min-width:32px;text-align:center;cursor:pointer;">${Math.round(currentZoom * 100)}%</span>
+            <button id="ts-zoom-in" title="Zoom In" style="background:#374151;color:#60a5fa;border:1px solid #4b5563;border-radius:3px;padding:1px 6px;cursor:pointer;font-weight:bold;font-size:12px;">+</button>
+          </div>
+        </div>
+      </div>
+
+      <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #475569;">
+        <div style="color:#f59e0b;font-weight:bold;margin-bottom:4px;font-size:11px;">⚙️ MODEL ENGINE OUTPUT (V16)</div>
+        <div style="color:#a7f3d0;font-style:italic;margin-bottom:8px;">${modelRes.ruleAppliedMsg}</div>
+
+        <div style="color:#f32424;font-weight:bold;margin-bottom:2px;">--- RANKED LEADERBOARD ---</div>
+        <div style="background:#0f172a;padding:6px;border-radius:4px;white-space:pre-wrap;margin-bottom:8px;color:#e2e8f0;max-height:160px;overflow-y:auto;font-size:10px;">${leaderboardHtml || 'Awaiting Field Calculation...'}</div>
+
+        <div style="color:#f32424;font-weight:bold;margin-bottom:2px;">--- TOP 5 DISTRIBUTION & GAPS ---</div>
+        <div style="background:#0f172a;padding:6px;border-radius:4px;white-space:pre-wrap;margin-bottom:8px;color:#cbd5e1;font-size:10px;">${gapHtml || 'N/A'}</div>
+
+        <div style="color:#f59e0b;font-weight:bold;margin-bottom:2px;">--- WAGER RECOMMENDATIONS ---</div>
+        <div style="background:#0f172a;padding:6px;border-radius:4px;color:#38bdf8;font-size:10px;">
+          <b>Scenario:</b> ${modelRes.wagerRecs.scenario}<br/><br/>
+          <b>OPTION A (Straight Focus):</b><br/> ${modelRes.wagerRecs.optionA}<br/><br/>
+          <b>OPTION B (Exotic Payout):</b><br/> ${modelRes.wagerRecs.optionB}
+          ${modelRes.wagerRecs.optionC ? `<br/><br/><b>OPTION C (Churchill Special):</b><br/> ${modelRes.wagerRecs.optionC}` : ''}
+        </div>
+      </div>
+
+      <div style="background:#1f2937;padding:8px;border-radius:6px;border:1px dashed #4b5563;">
+        <div style="color:#9ca3af;font-weight:bold;margin-bottom:4px;font-size:10px;">🔍 AUDIT SECTION (RAW EXTRACTED CSVs)</div>
+        <div style="color:#f59e0b;font-weight:bold;margin-bottom:2px;">--- ALL ACTIVE HORSES CSV ---</div>
+        <div style="background:#111827;padding:4px;border-radius:4px;word-break:break-all;white-space:pre-wrap;margin-bottom:6px;color:#34d399;max-height:100px;overflow-y:auto;font-size:9px;">${getFormattedHorsesCsv()}</div>
+        <div style="color:#f59e0b;font-weight:bold;margin-bottom:2px;">--- RACE STATS ROWS ---</div>
+        <div style="background:#111827;padding:4px;border-radius:4px;word-break:break-all;white-space:pre-wrap;color:#60a5fa;font-size:9px;">${cachedStatsCsv}</div>
+      </div>
+    `;
+
+    applyZoom();
+  }
+
+  function processResponse(url, text) {
+    if (!text || (text.trim().charAt(0) !== '{' && text.trim().charAt(0) !== '[')) return;
+    try {
+      let data = JSON.parse(text);
+
+      let urlData = parseTwinSpiresUrl();
+      if (urlData) {
+        if (urlData.raceNum && cachedRaceNum && urlData.raceNum !== cachedRaceNum) {
+          resetRaceData();
+          cachedRaceNum = urlData.raceNum;
+        }
+        if (urlData.trackName && cachedTrackName && urlData.trackName !== cachedTrackName && urlData.trackName !== "Unknown Track") {
+          resetRaceData();
+          cachedTrackName = urlData.trackName;
+        }
+      }
+
+      let runners = findRunnersArray(data);
+      if (runners && runners.length > 0) {
+        let sample = runners[0];
+        let payloadTrack = getActiveTrackName(sample) || getActiveTrackName(data);
+        let payloadRace = sample.raceNumber || data.raceNumber;
+
+        if (payloadTrack && payloadTrack !== "Unknown Track") cachedTrackName = payloadTrack;
+        if (payloadRace) cachedRaceNum = payloadRace;
+
+        runners.forEach(r => parseAndMergeRunnerRow(r));
+        updateOverlay();
+      }
+
+      let statsObj = findStatsObject(data);
+      if (statsObj) {
+        cachedStatsObj = statsObj;
+        let payloadTrack = getActiveTrackName(statsObj) || getActiveTrackName(data);
+        let payloadRace = statsObj.raceNumber || data.raceNumber;
+
+        if (payloadTrack && payloadTrack !== "Unknown Track") cachedTrackName = payloadTrack;
+        if (payloadRace) cachedRaceNum = payloadRace;
+
+        let statRows = parseStatsRows(statsObj);
+        cachedStatsCsv = statRows.map(r => Object.values(r).join(',')).join('\n');
+        updateOverlay();
+      }
+    } catch(e) {}
+  }
+
+  const origOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url) {
+    this.addEventListener('load', function() {
+      processResponse(url, this.responseText);
+    });
+    origOpen.apply(this, arguments);
+  };
+
+  const origFetch = window.fetch;
+  if (origFetch) {
+    window.fetch = async function(...args) {
+      let response = await origFetch.apply(this, args);
+      try {
+        let clone = response.clone();
+        let url = typeof args[0] === 'string' ? args[0] : (args[0] ? args[0].url : '');
+        clone.text().then(text => processResponse(url, text));
+      } catch(e) {}
+      return response;
+    };
+  }
+
+  updateOverlay();
+  console.log("🚀 Live Handicapping Model V16 Engine Running!");
+})();
