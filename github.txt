@@ -5,8 +5,6 @@ _______
 
 
 
-
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -15,7 +13,10 @@ _______
   <meta name="theme-color" content="#007bff">
   <title>My Mobile App</title>
   
-  <!-- Links the Manifest file -->
+  <!-- THIS LINE IS FOR IPHONE / SAFARI -->
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png">
+  
+  <!-- THIS LINE IS FOR MANIFEST / ANDROID -->
   <link rel="manifest" href="./manifest.json">
 </head>
 <body>
@@ -23,19 +24,17 @@ _______
   <h1>My App Works!</h1>
   <p>This app runs offline and can be installed on your home screen.</p>
 
-  <!-- Registers the Service Worker -->
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('./sw.js')
-          .then((reg) => console.log('Service Worker registered successfully:', reg))
+          .then((reg) => console.log('Service Worker registered:', reg))
           .catch((err) => console.error('Service Worker registration failed:', err));
       });
     }
   </script>
 </body>
 </html>
-
 
 
 
@@ -53,12 +52,12 @@ _______________________
   "theme_color": "#007bff",
   "icons": [
     {
-      "src": "icon-192.png",
+      "src": "android-chrome-192x192.png",
       "sizes": "192x192",
       "type": "image/png"
     },
     {
-      "src": "icon-512.png",
+      "src": "android-chrome-512x512.png",
       "sizes": "512x512",
       "type": "image/png"
     }
@@ -71,13 +70,17 @@ _______________________
 
 JS_____
 __________________________
+
+
+
 const CACHE_NAME = 'app-cache-v1';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
   './manifest.json',
-  './icon-192.png',
-  './icon-512.png'
+  './apple-touch-icon.png',
+  './android-chrome-192x192.png',
+  './android-chrome-512x512.png'
 ];
 
 self.addEventListener('install', (event) => {
@@ -95,5 +98,4 @@ self.addEventListener('fetch', (event) => {
     })
   );
 });
-
 
