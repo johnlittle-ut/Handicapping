@@ -1,14 +1,97 @@
-(function launchTwinSpiresVariableInspectorV16() {
+(function launchTwinSpiresVariableInspectorV24() {
   let currentZoom = 1.0;
+  let isDragging = false;
+  let dragOffsetX = 0;
+  let dragOffsetY = 0;
+
+  // Loader, Tab & Calculation Tracking State
+  const REQUIRED_TABS = ['Summary', 'Advanced', 'Speed', 'Class', 'Pace', 'Comments'];
+  let loadedTabs = {
+    'Summary': false,
+    'Advanced': false,
+    'Speed': false,
+    'Class': false,
+    'Pace': false,
+    'Comments': false
+  };
+
+  let isLoaderVisible = true;
+  let isCalculating = false;
+  let calcProgressPercent = 0;
+  let calcInterval = null;
+  let collectionStartTime = Date.now();
+  let collectionTicker = null;
+
+  function getLoadingProgress() {
+    let hasComments = Object.values(cachedHorsesMap).some(h => 
+      (h.COMMENTS_POS && h.COMMENTS_POS !== '""') || 
+      (h.COMMENTS_NEG && h.COMMENTS_NEG !== '""')
+    );
+    if (hasComments) {
+      loadedTabs['Comments'] = true;
+    }
+
+    // 30-Second Fallback: If 30 seconds have passed without comments, bypass Comments tab requirement
+    if (!loadedTabs['Comments'] && (Date.now() - collectionStartTime) >= 30000) {
+      loadedTabs['Comments'] = true;
+    }
+
+    let completed = 0;
+    REQUIRED_TABS.forEach(tab => {
+      if (loadedTabs[tab]) completed++;
+    });
+    let percent = Math.round((completed / REQUIRED_TABS.length) * 100);
+    return { completed, total: REQUIRED_TABS.length, percent };
+  }
+
+  function updateZoomPreview(previewZoom) {
+    let overlay = document.getElementById('ts-model-overlay');
+    if (!overlay) return;
+
+    let label = document.getElementById('ts-zoom-label');
+    if (label) label.innerText = `${Math.round(previewZoom * 100)}%`;
+
+    let outline = document.getElementById('ts-zoom-outline');
+    if (!outline) {
+      outline = document.createElement('div');
+      outline.id = 'ts-zoom-outline';
+      outline.style.cssText = 'position:fixed;z-index:1000000;border:2px dashed #60a5fa;background:rgba(59,130,246,0.18);pointer-events:none;border-radius:8px;box-shadow:0 0 15px rgba(96,165,250,0.4);transition:none;';
+      document.body.appendChild(outline);
+    }
+
+    let rect = overlay.getBoundingClientRect();
+    let unscaledW = overlay.offsetWidth;
+
+    let previewW = unscaledW * previewZoom;
+    let previewH = overlay.offsetHeight * previewZoom;
+
+    outline.style.top = `${rect.top}px`;
+    outline.style.left = `${rect.right - previewW}px`;
+    outline.style.width = `${previewW}px`;
+    outline.style.height = `${previewH}px`;
+    outline.style.display = 'block';
+  }
+
+  function removeZoomPreview() {
+    let outline = document.getElementById('ts-zoom-outline');
+    if (outline) {
+      outline.style.display = 'none';
+    }
+  }
 
   function applyZoom() {
     let overlay = document.getElementById('ts-model-overlay');
     if (overlay) {
-      overlay.style.transform = `scale(${currentZoom})`;
       overlay.style.transformOrigin = 'top right';
+      overlay.style.transform = `scale(${currentZoom})`;
       let label = document.getElementById('ts-zoom-label');
       if (label) label.innerText = `${Math.round(currentZoom * 100)}%`;
+      let slider = document.getElementById('ts-zoom-slider');
+      if (slider && parseFloat(slider.value) !== Math.round(currentZoom * 100)) {
+        slider.value = Math.round(currentZoom * 100);
+      }
     }
+    removeZoomPreview();
   }
 
   function resetRaceData() {
@@ -16,21 +99,75 @@
     cachedScratchedMap = {};
     cachedStatsObj = null;
     cachedStatsCsv = "Awaiting Race Stats Data...";
+    cachedTrackCondition = "";
+    cachedPostTime = "N/A";
+    REQUIRED_TABS.forEach(tab => loadedTabs[tab] = false);
+    
+    // Reset loader, calculation & timer state
+    isLoaderVisible = true;
+    isCalculating = false;
+    calcProgressPercent = 0;
+    collectionStartTime = Date.now();
+
+    if (calcInterval) {
+      clearInterval(calcInterval);
+      calcInterval = null;
+    }
+    if (collectionTicker) {
+      clearInterval(collectionTicker);
+      collectionTicker = null;
+    }
+    
+    startCollectionTicker();
+  }
+
+  function startCollectionTicker() {
+    if (collectionTicker) clearInterval(collectionTicker);
+    collectionTicker = setInterval(() => {
+      if (isLoaderVisible && !isCalculating) {
+        updateOverlay();
+      } else {
+        clearInterval(collectionTicker);
+        collectionTicker = null;
+      }
+    }, 1000);
   }
 
   if (!window.__tsEventListenerAttached) {
+    document.addEventListener('input', function(e) {
+      if (e.target && e.target.id === 'ts-zoom-slider') {
+        let previewVal = parseFloat(e.target.value) / 100.0;
+        updateZoomPreview(previewVal);
+      }
+    });
+
+    function commitZoom(e) {
+      if (e.target && e.target.id === 'ts-zoom-slider') {
+        let slider = document.getElementById('ts-zoom-slider');
+        if (slider) {
+          currentZoom = parseFloat(slider.value) / 100.0;
+          applyZoom();
+        }
+      }
+    }
+
+    document.addEventListener('change', commitZoom);
+    document.addEventListener('mouseup', commitZoom);
+    document.addEventListener('touchend', commitZoom);
+
+    // Global Click Handler for TwinSpires Website Program Tabs
     document.addEventListener('click', function(e) {
       if (!e.target) return;
-      if (e.target.id === 'ts-zoom-in') {
-        currentZoom = Math.min(2.0, Math.round((currentZoom + 0.1) * 10) / 10);
-        applyZoom();
-      } else if (e.target.id === 'ts-zoom-out') {
-        currentZoom = Math.max(0.5, Math.round((currentZoom - 0.1) * 10) / 10);
-        applyZoom();
-      } else if (e.target.id === 'ts-zoom-reset') {
-        currentZoom = 1.0;
-        applyZoom();
-      } else if (e.target.id === 'ts-refresh-btn') {
+
+      let clickedText = (e.target.innerText || e.target.textContent || '').trim();
+      REQUIRED_TABS.forEach(tab => {
+        if (tab !== 'Comments' && (clickedText.toLowerCase() === tab.toLowerCase() || clickedText.toLowerCase().includes(tab.toLowerCase()))) {
+          loadedTabs[tab] = true;
+          setTimeout(updateOverlay, 100);
+        }
+      });
+
+      if (e.target.id === 'ts-refresh-btn') {
         let urlData = parseTwinSpiresUrl();
         if (urlData) {
           cachedTrackName = urlData.trackName;
@@ -40,6 +177,41 @@
         updateOverlay();
       }
     });
+
+    document.addEventListener('mousedown', function(e) {
+      if (!e.target) return;
+      if (e.target.id === 'ts-drag-handle' || e.target.closest('#ts-drag-handle')) {
+        let overlay = document.getElementById('ts-model-overlay');
+        if (!overlay) return;
+        isDragging = true;
+        let rect = overlay.getBoundingClientRect();
+        dragOffsetX = e.clientX - rect.left;
+        dragOffsetY = e.clientY - rect.top;
+        e.preventDefault();
+      }
+    });
+
+    document.addEventListener('mousemove', function(e) {
+      if (!isDragging) return;
+      let overlay = document.getElementById('ts-model-overlay');
+      if (!overlay) return;
+
+      let newLeft = e.clientX - dragOffsetX;
+      let newTop = e.clientY - dragOffsetY;
+      let unscaledW = overlay.offsetWidth;
+
+      let posX = newLeft + unscaledW * (currentZoom - 1.0);
+
+      overlay.style.right = 'auto';
+      overlay.style.left = `${posX}px`;
+      overlay.style.top = `${newTop}px`;
+      overlay.style.transformOrigin = 'top right';
+    });
+
+    document.addEventListener('mouseup', function() {
+      isDragging = false;
+    });
+
     window.__tsEventListenerAttached = true;
   }
 
@@ -59,7 +231,9 @@
 
   let cachedTrackName = "";
   let cachedRaceNum = "";
+  let cachedPostTime = "N/A";
   let cachedBreed = "Thoroughbred";
+  let cachedTrackCondition = "";
   let cachedHorsesMap = {}; 
   let cachedScratchedMap = {};
   let cachedStatsObj = null;
@@ -70,6 +244,13 @@
     'today', 'summary', 'entries', 'results', 'overview', 
     'brisnet', 'track', 'tracks', 'speed', 'pace', 'class', 'program', 'classic'
   ];
+
+  function isHeavyWetTrack(condVal) {
+    if (!condVal) return false;
+    let c = String(condVal).toUpperCase().trim();
+    const wetKeywords = ['MUDDY', 'SLOPPY', 'HEAVY', 'YIELDING', 'SOFT', 'WET', 'MY', 'SY', 'HY', 'YL', 'SF', 'WF'];
+    return wetKeywords.some(k => c === k || c.includes(k));
+  }
 
   function getActiveTrackName(payloadObj) {
     let urlData = parseTwinSpiresUrl();
@@ -100,6 +281,52 @@
     if (urlData && urlData.raceNum) return urlData.raceNum;
     if (payloadRace) return payloadRace;
     return cachedRaceNum || 1;
+  }
+
+  function getActivePostTime() {
+    if (cachedPostTime && cachedPostTime !== "N/A" && cachedPostTime !== "") return cachedPostTime;
+    
+    // Search broader DOM selectors for TwinSpires UI
+    let postElem = document.querySelector('[class*="post-time"], [class*="postTime"], [class*="PostTime"], .m-post-time, [data-testid*="post-time"]');
+    if (postElem && postElem.innerText) {
+      let txt = postElem.innerText.replace(/post time/i, '').trim();
+      if (txt) return txt;
+    }
+    return "N/A";
+  }
+
+  function parseExportDateTime(rawPostTime) {
+    let dateObj = new Date();
+    let timeStr = "";
+
+    if (rawPostTime && rawPostTime !== "N/A") {
+      let parsed = new Date(rawPostTime);
+      if (!isNaN(parsed.getTime())) {
+        dateObj = parsed;
+        let hours = dateObj.getHours();
+        let minutes = dateObj.getMinutes();
+        let ampm = hours >= 12 ? 'pm' : 'am';
+        hours = hours % 12;
+        hours = hours ? hours : 12;
+        minutes = minutes < 10 ? '0' + minutes : minutes;
+        timeStr = `${hours}:${minutes}${ampm}`;
+      } else {
+        timeStr = rawPostTime.toLowerCase().replace(/\s+/g, '');
+      }
+    }
+
+    if (!timeStr) {
+      let hours = dateObj.getHours();
+      let minutes = dateObj.getMinutes();
+      let ampm = hours >= 12 ? 'pm' : 'am';
+      hours = hours % 12;
+      hours = hours ? hours : 12;
+      minutes = minutes < 10 ? '0' + minutes : minutes;
+      timeStr = `${hours}:${minutes}${ampm}`;
+    }
+
+    let dateStr = `${dateObj.getMonth() + 1}/${dateObj.getDate()}/${dateObj.getFullYear()}`;
+    return { dateStr, timeStr };
   }
 
   function getVal(obj, keys, defaultVal = 0) {
@@ -185,6 +412,9 @@
   function parseAndMergeRunnerRow(r) {
     if (!r || typeof r !== 'object') return null;
 
+    let runnerCond = getStr(r, ['trackCondition', 'condition', 'surfaceCondition'], '');
+    if (runnerCond) cachedTrackCondition = runnerCond;
+
     let rawName = getStr(r, ['name', 'horseName'], '').replace(/"/g, '');
     let prog = getStr(r, ['programNumber', 'postPosition'], '1');
     let post = getVal(r, ['postPosition', 'programNumber'], parseInt(prog) || 1);
@@ -200,6 +430,13 @@
       return null;
     } else {
       delete cachedScratchedMap[prog];
+    }
+
+    let posComm = getStr(r, ['commentsPositive', 'positiveComments', 'commentPositive'], '').replace(/"/g, "'");
+    let negComm = getStr(r, ['commentsNegative', 'negativeComments', 'commentNegative'], '').replace(/"/g, "'");
+
+    if (posComm || negComm) {
+      loadedTabs['Comments'] = true;
     }
 
     let freshData = {
@@ -223,7 +460,10 @@
       E1: getVal(r, ['averagePaceE1', 'avgPaceE1', 'e1Pace'], 0),
       E2: getVal(r, ['averagePaceE2', 'avgPaceE2', 'e2Pace'], 0),
       LP: getVal(r, ['averagePaceLP', 'avgPaceLP', 'latePace'], 0),
-      DAYS_OFF: getVal(r, ['daysOff', 'daysSinceLastRace'], 0)
+      DAYS_OFF: getVal(r, ['daysOff', 'daysSinceLastRace'], 0),
+      PL_PRED: getVal(r, ['plPredScore', 'pl_pred_score'], 0),
+      COMMENTS_POS: posComm ? `"${posComm}"` : '""',
+      COMMENTS_NEG: negComm ? `"${negComm}"` : '""'
     };
 
     let existing = cachedHorsesMap[prog];
@@ -239,7 +479,7 @@
       } else if (typeof val === 'number') {
         if (val !== 0 || existing[key] === undefined) existing[key] = val;
       } else if (typeof val === 'string') {
-        if ((val !== '' && val !== 'N/A' && val !== 'UNDEFINED') || !existing[key]) existing[key] = val;
+        if ((val !== '' && val !== '""' && val !== 'N/A' && val !== 'UNDEFINED') || !existing[key]) existing[key] = val;
       }
     }
     return existing;
@@ -253,7 +493,10 @@
       let numB = parseInt(String(b.PROGRAM).replace(/\D/g, ''), 10) || 0;
       return numA - numB;
     });
-    return sorted.map(h => Object.values(h).join(',')).join('\n');
+
+    let headerRow = Object.keys(sorted[0]).join(',');
+    let dataRows = sorted.map(h => Object.values(h).join(',')).join('\n');
+    return `${headerRow}\n${dataRows}`;
   }
 
   function parseStatsRows(s) {
@@ -263,6 +506,9 @@
     cachedBreed = breed;
     let track = getActiveTrackName(s);
     let raceNum = getActiveRaceNum(s.raceNumber);
+
+    let statCond = getStr(s, ['trackCondition', 'condition', 'surfaceCondition'], '');
+    if (statCond) cachedTrackCondition = statCond;
 
     function formatBias(val) {
       let num = parseFloat(val) || 0;
@@ -367,6 +613,11 @@
       ruleAppliedMsg = `[Rule Applied] Blending 65% Week / 35% Meet (Week sample sufficient: ${Math.round(weekRaces)} >= 15 races)`;
     }
 
+    let isWet = isHeavyWetTrack(cachedTrackCondition);
+    if (isWet) {
+      ruleAppliedMsg += ` | [Track Condition: ${cachedTrackCondition.toUpperCase()} — Power Bonus Zeroed]`;
+    }
+
     let activeSpeedBias = (wWeek * weekBias) + (wMeet * meetBias);
     let postIvMapping = {
       "RAIL": Math.round(((wWeek * weekIV.RAIL) + (wMeet * meetIV.RAIL)) * 100) / 100,
@@ -382,12 +633,11 @@
       "S": Math.round(((wWeek * weekIV.S) + (wMeet * meetIV.S)) * 100) / 100
     };
 
-    // V16 UPDATED WEIGHTS: Dampened W_Market to 0.03 across all profiles
     const weightsDict = {
-      'Thoroughbred': { W_Speed: 0.18, W_Power: 0.10, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.06, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Course: 0.02, W_Market: 0.03 },
-      'Harness': { W_Speed: 0.16, W_Power: 0.07, W_Class: 0.13, W_Distance: 0.04, W_Driver: 0.18, W_Trainer: 0.06, W_Early: 0.18, W_Finish: 0.08, W_Recency: 0.04, W_Course: 0.03, W_Market: 0.03 },
-      'Quarter Horse': { W_Speed: 0.26, W_Power: 0.10, W_Class: 0.09, W_Distance: 0.02, W_Driver: 0.07, W_Trainer: 0.07, W_Early: 0.34, W_Finish: 0.00, W_Recency: 0.02, W_Course: 0.00, W_Market: 0.03 },
-      'Churchill Downs': { W_Speed: 0.16, W_Power: 0.09, W_Class: 0.17, W_Distance: 0.11, W_Driver: 0.08, W_Trainer: 0.08, W_Early: 0.11, W_Finish: 0.12, W_Recency: 0.03, W_Course: 0.02, W_Market: 0.03 }
+      'Thoroughbred': { W_Speed: 0.18, W_Power: 0.10, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.06, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Market: 0.03 },
+      'Harness': { W_Speed: 0.16, W_Power: 0.07, W_Class: 0.13, W_Distance: 0.04, W_Driver: 0.18, W_Trainer: 0.06, W_Early: 0.18, W_Finish: 0.08, W_Recency: 0.04, W_Market: 0.03 },
+      'Quarter Horse': { W_Speed: 0.26, W_Power: 0.10, W_Class: 0.09, W_Distance: 0.02, W_Driver: 0.07, W_Trainer: 0.07, W_Early: 0.34, W_Finish: 0.00, W_Recency: 0.02, W_Market: 0.03 },
+      'Churchill Downs': { W_Speed: 0.16, W_Power: 0.09, W_Class: 0.17, W_Distance: 0.11, W_Driver: 0.08, W_Trainer: 0.08, W_Early: 0.11, W_Finish: 0.12, W_Recency: 0.03, W_Market: 0.03 }
     };
 
     let activeWeights = Object.assign({}, cleanTrack === 'Churchill Downs' ? weightsDict['Churchill Downs'] : (weightsDict[cleanBreed] || weightsDict['Thoroughbred']));
@@ -447,6 +697,13 @@
       });
     });
 
+    let pwrVals = runners.map(r => parseFloat(r.PRM_PWR) || 0).sort((a, b) => a - b);
+    let medianPwr = 0;
+    if (pwrVals.length > 0) {
+      let mid = Math.floor(pwrVals.length / 2);
+      medianPwr = pwrVals.length % 2 !== 0 ? pwrVals[mid] : (pwrVals[mid - 1] + pwrVals[mid]) / 2;
+    }
+
     runners.forEach(r => {
       let mlDec = parseOddsToDecimal(r.ML_ODDS);
       let liveDec = parseOddsToDecimal(r.LIVE_ODDS);
@@ -461,7 +718,10 @@
       else if (avgDist > 0) cSpeed = avgDist;
       else cSpeed = avgSpd;
 
-      let cPower = parseFloat(r.PRM_PWR) || 0;
+      let rawPower = parseFloat(r.PRM_PWR) || 0;
+      let cPower = rawPower;
+
+      let powerBonus = (isWet || rawPower <= medianPwr) ? 0.0 : 0.0; 
 
       let avgCls = parseFloat(r.AVG_CLS) || 0;
       let lastCls = parseFloat(r.LAST_CLS) || 0;
@@ -486,7 +746,6 @@
       else if (days >= 46 && days <= 90) cRecency = 70.0;
       else if (days > 90) cRecency = 50.0;
 
-      let cCourse = 0.0;
       let cMarket = !isNaN(finalOddsDec) && finalOddsDec > 0 ? (1.0 / (finalOddsDec + 1.0)) * 100.0 : 0.0;
 
       let baseSkill = 
@@ -499,17 +758,17 @@
         (cEarly * activeWeights.W_Early) +
         (cFinish * activeWeights.W_Finish) +
         (cRecency * activeWeights.W_Recency) +
-        (cCourse * activeWeights.W_Course) +
         (cMarket * activeWeights.W_Market);
 
       let postCat = getPostCat(r.POST);
       let postBonus = calcPostBonus(postCat);
       let styleBonus = calcStyleBonus(r.RUN_STYLE, r.RUN_STYLE_PTS);
 
+      r.POWER_BONUS = powerBonus;
       r.BASE_SKILL = Math.round(baseSkill * 100) / 100;
       r.POST_BONUS = postBonus;
       r.STYLE_BONUS = styleBonus;
-      r.FINAL_SCORE = Math.round((baseSkill + postBonus + styleBonus) * 100) / 100;
+      r.FINAL_SCORE = Math.round((baseSkill + postBonus + styleBonus + powerBonus) * 100) / 100;
     });
 
     runners.sort((a, b) => b.FINAL_SCORE - a.FINAL_SCORE);
@@ -525,6 +784,8 @@
     let gap12 = Math.round((s1 - s2) * 100) / 100;
     let gap23 = Math.round((s2 - s3) * 100) / 100;
     let gap34 = Math.round((s3 - s4) * 100) / 100;
+    let gap45 = Math.round((s4 - s5) * 100) / 100;
+
     let gap13 = Math.round((s1 - s3) * 100) / 100;
     let gap14 = Math.round((s1 - s4) * 100) / 100;
 
@@ -535,7 +796,6 @@
 
     let scenario = "", optionA = "", optionB = "", optionC = null;
 
-    // V16 UPDATED DECISION THRESHOLDS (8.0pt dominant gap / 5.0pt pass rule)
     if (gap14 < 5.0 && runners.length >= 4) {
       scenario = "Ultra-Tight Field / High Chaos (Top 4 within 5.0 pts)";
       optionA = `PASS / NO BET (Or Value WIN Wager on highest live odds among #${p1}, #${p2}, #${p3})`;
@@ -576,9 +836,184 @@
     return {
       ruleAppliedMsg,
       leaderboard: runners,
-      gaps: { gap12, gap23, gap34, gap13, gap14 },
+      gaps: { gap12, gap23, gap34, gap45, gap13, gap14 },
       wagerRecs: { scenario, optionA, optionB, optionC }
     };
+  }
+
+  function getCommentsSectionHtml(leaderboard) {
+    let top5 = leaderboard.slice(0, 5);
+    if (!top5 || top5.length === 0) {
+      return `
+        <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #f59e0b;">
+          <div style="color:#f59e0b;font-weight:bold;margin-bottom:6px;font-size:11px;">COMMENTS</div>
+          <div style="color:#9ca3af;font-size:10px;">Awaiting Runner Data...</div>
+        </div>
+      `;
+    }
+
+    let contentHtml = top5.map(h => {
+      let nameStr = h.HORSE_NAME.replace(/"/g, '');
+      let posStr = h.COMMENTS_POS ? h.COMMENTS_POS.replace(/^"|"$/g, '').trim() : '';
+      let negStr = h.COMMENTS_NEG ? h.COMMENTS_NEG.replace(/^"|"$/g, '').trim() : '';
+
+      return `
+        <div style="margin-bottom:6px;padding-bottom:6px;border-bottom:1px dashed #334155;">
+          <div style="color:#fbbf24;font-weight:bold;font-size:10px;margin-bottom:2px;">#${h.PROGRAM} ${nameStr}</div>
+          <div style="color:#34d399;font-size:9.5px;margin-bottom:1px;"><b>(+) Pos:</b> ${posStr || 'None'}</div>
+          <div style="color:#f87171;font-size:9.5px;"><b>(-) Neg:</b> ${negStr || 'None'}</div>
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #f59e0b;">
+        <div style="color:#f59e0b;font-weight:bold;margin-bottom:6px;font-size:11px;">COMMENTS</div>
+        <div style="background:#0f172a;padding:8px;border-radius:4px;max-height:180px;overflow-y:auto;">
+          ${contentHtml}
+        </div>
+      </div>
+    `;
+  }
+
+  function getTestingExportSectionHtml(modelRes) {
+    let rawPostTime = getActivePostTime();
+    let { dateStr, timeStr } = parseExportDateTime(rawPostTime);
+
+    let trackName = getActiveTrackName().replace(/"/g, '');
+    let raceNum = getActiveRaceNum();
+    let breed = cachedBreed || "Thoroughbred";
+
+    let top1 = modelRes.leaderboard[0];
+    let top2 = modelRes.leaderboard[1];
+    let top3 = modelRes.leaderboard[2];
+
+    let p1 = top1 ? `#${top1.PROGRAM}` : 'N/A';
+    let s1 = top1 ? top1.FINAL_SCORE.toFixed(2) : 'N/A';
+
+    let p2 = top2 ? `#${top2.PROGRAM}` : 'N/A';
+    let s2 = top2 ? top2.FINAL_SCORE.toFixed(2) : 'N/A';
+
+    let p3 = top3 ? `#${top3.PROGRAM}` : 'N/A';
+    let s3 = top3 ? top3.FINAL_SCORE.toFixed(2) : 'N/A';
+
+    let pipeString = `${dateStr}|${timeStr}|${trackName}|${raceNum}|${breed}|${p1}|${s1}|${p2}|${s2}|${p3}|${s3}`;
+
+    return `
+      <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #a855f7;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <div style="color:#c084fc;font-weight:bold;font-size:11px;">🧪 TESTING EXPORT DATA (PIPE DELIMITED)</div>
+          <div style="color:#9ca3af;font-size:9px;">Excel / Text-to-Columns Ready</div>
+        </div>
+        <div style="background:#0f172a;padding:8px;border-radius:4px;color:#f3e8ff;font-size:10px;word-break:break-all;user-select:all;border:1px solid #581c87;font-family:monospace;">
+          ${pipeString}
+        </div>
+        <div style="color:#9ca3af;font-size:9px;margin-top:4px;font-style:italic;">
+          Format: [Date]|[Post Time]|[Track]|[Race #]|[Breed]|[1st #]|[1st Score]|[2nd #]|[2nd Score]|[3rd #]|[3rd Score]
+        </div>
+      </div>
+    `;
+  }
+
+  function getLoaderSectionHtml() {
+    if (!isLoaderVisible) return '';
+
+    let progress = getLoadingProgress();
+    let isDataComplete = progress.percent === 100;
+
+    // Trigger 16-second calculation phase when data collection reaches 100%
+    if (isDataComplete && !isCalculating && calcProgressPercent === 0) {
+      if (collectionTicker) {
+        clearInterval(collectionTicker);
+        collectionTicker = null;
+      }
+      isCalculating = true;
+      let startTime = Date.now();
+      calcInterval = setInterval(() => {
+        let elapsed = Date.now() - startTime;
+        calcProgressPercent = Math.min(100, (elapsed / 16000) * 100);
+        if (elapsed >= 16000) {
+          clearInterval(calcInterval);
+          calcInterval = null;
+          isLoaderVisible = false;
+          isCalculating = false;
+        }
+        updateOverlay();
+      }, 100);
+    }
+
+    // Render Calculation Progress Bar
+    if (isCalculating) {
+      let secondsLeft = Math.max(0, (16 - (calcProgressPercent * 0.16))).toFixed(1);
+      return `
+        <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #3b82f6;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <div style="color:#60a5fa;font-weight:bold;font-size:11px;">⚙️ MODEL CALCULATIONS IN PROGRESS</div>
+            <div style="color:#93c5fd;font-weight:bold;font-size:10px;">${Math.round(calcProgressPercent)}%</div>
+          </div>
+          
+          <div style="color:#cbd5e1;font-size:10px;margin-bottom:12px;line-height:1.3;">
+            Please allow a moment for calculations...
+          </div>
+
+          <!-- Progress Bar Container with Running Horse Icon -->
+          <div style="position:relative;margin-top:22px;background:#0f172a;border-radius:8px;padding:3px;border:1px solid #334155;">
+            <div style="position:absolute;top:-20px;left:${calcProgressPercent}%;transform:translateX(-50%) scaleX(-1);font-size:16px;line-height:1;pointer-events:none;transition:left 0.1s linear;">
+              🏇
+            </div>
+            <div style="width:${calcProgressPercent}%;background:linear-gradient(90deg, #3b82f6 0%, #8b5cf6 50%, #ec4899 100%);height:10px;border-radius:6px;transition:width 0.1s linear;"></div>
+          </div>
+          <div style="text-align:right;color:#9ca3af;font-size:9px;margin-top:4px;">
+            ${secondsLeft}s remaining
+          </div>
+        </div>
+      `;
+    }
+
+    // Render Initial Data Collection Progress
+    let elapsedSecs = Math.floor((Date.now() - collectionStartTime) / 1000);
+    let timeRemaining = Math.max(0, 30 - elapsedSecs);
+
+    let tabListHtml = REQUIRED_TABS.map(tab => {
+      let isLoaded = loadedTabs[tab];
+      let color = isLoaded ? '#34d399' : '#f87171';
+      let icon = isLoaded ? '🟢' : '🔴';
+      let statusText = isLoaded ? 'LOADED' : (tab === 'Comments' ? `AWAITING DATA (${timeRemaining}s TIMEOUT)` : 'CLICK TAB ON PAGE');
+      return `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:#0f172a;border-radius:4px;margin-bottom:4px;border:1px solid ${isLoaded ? '#059669' : '#991b1b'};">
+          <span style="color:#ffffff;font-weight:bold;font-size:10px;">${icon} ${tab}</span>
+          <span style="color:${color};font-weight:bold;font-size:9px;">${statusText}</span>
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #ef4444;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <div style="color:#fbbf24;font-weight:bold;font-size:11px;">⏳ DATA COLLECTION STATUS</div>
+          <div style="color:#f87171;font-weight:bold;font-size:10px;">${progress.percent}% COMPLETE</div>
+        </div>
+        
+        <div style="color:#cbd5e1;font-size:10px;margin-bottom:8px;line-height:1.3;">
+          Loading data... click each program tab to help me find data:
+        </div>
+
+        <div style="margin-bottom:8px;">
+          ${tabListHtml}
+        </div>
+
+        <!-- Progress Bar Container with Running Horse Icon -->
+        <div style="position:relative;margin-top:22px;background:#0f172a;border-radius:8px;padding:3px;border:1px solid #334155;">
+          <div style="position:absolute;top:-20px;left:${progress.percent}%;transform:translateX(-50%) scaleX(-1);font-size:16px;line-height:1;pointer-events:none;transition:left 0.3s ease;">
+            🏇
+          </div>
+          <div style="width:${progress.percent}%;background:linear-gradient(90deg, #ef4444 0%, #f59e0b 50%, #10b981 100%);height:10px;border-radius:6px;transition:width 0.3s ease;"></div>
+        </div>
+        <div style="text-align:right;color:#9ca3af;font-size:9px;margin-top:3px;">
+          ${progress.completed} of ${progress.total} Items Collected
+        </div>
+      </div>
+    `;
   }
 
   function updateOverlay() {
@@ -586,7 +1021,7 @@
     if (!existing) {
       existing = document.createElement('div');
       existing.id = 'ts-model-overlay';
-      existing.style.cssText = 'position:fixed;top:40px;right:20px;z-index:999999;background:#111827;color:#ffffff;padding:16px;border-radius:8px;box-shadow:0 10px 25px rgba(0,0,0,0.5);font-family:monospace;min-width:440px;max-width:620px;max-height:88vh;overflow-y:auto;border:2px solid #3b82f6;font-size:11px;';
+      existing.style.cssText = 'position:fixed;top:40px;right:20px;z-index:999999;background:#111827;color:#ffffff;padding:16px;border-radius:8px;box-shadow:0 10px 25px rgba(0,0,0,0.5);font-family:monospace;min-width:460px;max-width:620px;max-height:88vh;overflow-y:auto;border:2px solid #3b82f6;font-size:11px;transform-origin:top right;';
       document.body.appendChild(existing);
     }
 
@@ -595,40 +1030,53 @@
     let activeStartersCount = Object.keys(cachedHorsesMap).length;
     let scratchedHorsesCount = Object.keys(cachedScratchedMap).length;
     let currentDate = new Date().toISOString().split('T')[0];
+    let condTag = cachedTrackCondition ? ` (${cachedTrackCondition.toUpperCase()})` : '';
 
     let modelRes = calculateModelOutput();
 
     let leaderboardHtml = modelRes.leaderboard.map(h => {
       let nameStr = h.HORSE_NAME.replace(/"/g, '');
-      return `R${h.RANK} | #${h.PROGRAM} ${nameStr} | Final: ${h.FINAL_SCORE.toFixed(2)} = Base: ${h.BASE_SKILL.toFixed(2)} + Post: ${h.POST_BONUS.toFixed(2)} + Style: ${h.STYLE_BONUS.toFixed(2)}`;
+      let pwrBonusStr = h.POWER_BONUS > 0 ? ` + Pwr: ${h.POWER_BONUS.toFixed(2)}` : '';
+      return `R${h.RANK} | #${h.PROGRAM} ${nameStr} | Final: ${h.FINAL_SCORE.toFixed(2)} = Base: ${h.BASE_SKILL.toFixed(2)} + Post: ${h.POST_BONUS.toFixed(2)} + Style: ${h.STYLE_BONUS.toFixed(2)}${pwrBonusStr}`;
     }).join('\n');
 
-    let gapHtml = modelRes.leaderboard.slice(0, 5).map((h, i) => {
+    let gapHtml = modelRes.leaderboard.slice(0, 5).map((h, i, arr) => {
       let nameStr = h.HORSE_NAME.replace(/"/g, '');
-      let gapStr = i === 0 ? "(Leader)" : `(Gap to #1: -${(modelRes.leaderboard[0].FINAL_SCORE - h.FINAL_SCORE).toFixed(2)})`;
+      let gapStr = i === 0 
+        ? "(Leader)" 
+        : `(Gap to Rank ${i}: -${(arr[i - 1].FINAL_SCORE - h.FINAL_SCORE).toFixed(2)})`;
       return `  Rank ${i+1}: #${h.PROGRAM} ${nameStr} — Score: ${h.FINAL_SCORE.toFixed(2)} ${gapStr}`;
     }).join('\n');
 
     existing.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #3b82f6;padding-bottom:6px;margin-bottom:10px;">
-        <div style="color:#60a5fa;font-weight:bold;font-size:12px;">
-          📍 ${trackDisplay} — RACE #${raceDisplay} | ${currentDate}<br/>
-          <span style="color:#9ca3af;font-size:10px;">${activeStartersCount} Active Starters | ${scratchedHorsesCount} Scratched</span>
+      <div style="border-bottom:2px solid #3b82f6;padding-bottom:8px;margin-bottom:12px;">
+        <!-- ROW 1: Track Name, Race #, Date -->
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;color:#60a5fa;font-weight:bold;font-size:13px;">
+          <span>📍 ${trackDisplay} — RACE #${raceDisplay}${condTag}</span>
+          <span style="color:#9ca3af;font-size:11px;">📅 ${currentDate}</span>
         </div>
-        
-        <div style="display:flex;align-items:center;gap:6px;">
-          <button id="ts-refresh-btn" title="Clear Cache & Reset Race" style="background:#2563eb;color:#ffffff;border:1px solid #3b82f6;border-radius:4px;padding:2px 8px;cursor:pointer;font-weight:bold;font-size:11px;">🔄 Reset</button>
 
-          <div style="display:flex;align-items:center;gap:3px;background:#1f2937;padding:3px 6px;border-radius:4px;border:1px solid #374151;user-select:none;">
-            <button id="ts-zoom-out" title="Zoom Out" style="background:#374151;color:#60a5fa;border:1px solid #4b5563;border-radius:3px;padding:1px 6px;cursor:pointer;font-weight:bold;font-size:12px;">-</button>
-            <span id="ts-zoom-label" id="ts-zoom-reset" title="Click to Reset" style="color:#9ca3af;font-size:10px;min-width:32px;text-align:center;cursor:pointer;">${Math.round(currentZoom * 100)}%</span>
-            <button id="ts-zoom-in" title="Zoom In" style="background:#374151;color:#60a5fa;border:1px solid #4b5563;border-radius:3px;padding:1px 6px;cursor:pointer;font-weight:bold;font-size:12px;">+</button>
+        <!-- ROW 2: Move Button, Reset Button, Zoom Slider -->
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+          <button id="ts-drag-handle" title="Click and drag to move panel" style="flex:1;background:#374151;color:#fbbf24;border:1px solid #4b5563;border-radius:4px;padding:4px 8px;cursor:move;font-weight:bold;font-size:11px;">✋ MOVE</button>
+          <button id="ts-refresh-btn" title="Clear Cache & Reset Race" style="flex:1;background:#2563eb;color:#ffffff;border:1px solid #3b82f6;border-radius:4px;padding:4px 8px;cursor:pointer;font-weight:bold;font-size:11px;">🔄 RESET</button>
+          <div style="flex:1.8;display:flex;align-items:center;gap:6px;background:#1f2937;padding:3px 8px;border-radius:4px;border:1px solid #374151;">
+            <span style="color:#9ca3af;font-size:10px;font-weight:bold;">ZOOM</span>
+            <input type="range" id="ts-zoom-slider" min="50" max="200" value="${Math.round(currentZoom * 100)}" style="width:100%;cursor:pointer;accent-color:#3b82f6;">
+            <span id="ts-zoom-label" style="color:#60a5fa;font-size:10px;font-weight:bold;min-width:34px;text-align:right;">${Math.round(currentZoom * 100)}%</span>
           </div>
+        </div>
+
+        <!-- ROW 3: Active / Scratched Starters Count -->
+        <div style="color:#9ca3af;font-size:11px;text-align:center;background:#1f2937;padding:4px;border-radius:4px;border:1px solid #374151;">
+          <span style="color:#34d399;font-weight:bold;">${activeStartersCount}</span> Active Starters &nbsp;|&nbsp; <span style="color:#f87171;font-weight:bold;">${scratchedHorsesCount}</span> Scratched
         </div>
       </div>
 
+      ${getLoaderSectionHtml()}
+
       <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #475569;">
-        <div style="color:#f59e0b;font-weight:bold;margin-bottom:4px;font-size:11px;">⚙️ MODEL ENGINE OUTPUT (V16)</div>
+        <div style="color:#f59e0b;font-weight:bold;margin-bottom:4px;font-size:11px;">Little John's Top Picks</div>
         <div style="color:#a7f3d0;font-style:italic;margin-bottom:8px;">${modelRes.ruleAppliedMsg}</div>
 
         <div style="color:#f32424;font-weight:bold;margin-bottom:2px;">--- RANKED LEADERBOARD ---</div>
@@ -646,8 +1094,12 @@
         </div>
       </div>
 
+      ${getCommentsSectionHtml(modelRes.leaderboard)}
+
+      ${getTestingExportSectionHtml(modelRes)}
+
       <div style="background:#1f2937;padding:8px;border-radius:6px;border:1px dashed #4b5563;">
-        <div style="color:#9ca3af;font-weight:bold;margin-bottom:4px;font-size:10px;">🔍 AUDIT SECTION (RAW EXTRACTED CSVs)</div>
+        <div style="color:#9ca3af;font-weight:bold;margin-bottom:4px;font-size:10px;">AUDIT SECTION (RAW EXTRACTED CSVs)</div>
         <div style="color:#f59e0b;font-weight:bold;margin-bottom:2px;">--- ALL ACTIVE HORSES CSV ---</div>
         <div style="background:#111827;padding:4px;border-radius:4px;word-break:break-all;white-space:pre-wrap;margin-bottom:6px;color:#34d399;max-height:100px;overflow-y:auto;font-size:9px;">${getFormattedHorsesCsv()}</div>
         <div style="color:#f59e0b;font-weight:bold;margin-bottom:2px;">--- RACE STATS ROWS ---</div>
@@ -662,6 +1114,16 @@
     if (!text || (text.trim().charAt(0) !== '{' && text.trim().charAt(0) !== '[')) return;
     try {
       let data = JSON.parse(text);
+
+      let payloadCond = getStr(data, ['trackCondition', 'condition', 'surfaceCondition', 'track_condition'], '');
+      if (payloadCond) cachedTrackCondition = payloadCond;
+
+      let payloadPostTime = getStr(data, [
+        'postTime', 'post_time', 'startTime', 'racePostTime', 
+        'postTimeFormatted', 'post_time_formatted', 'scheduledStart', 
+        'postTimeEpoch', 'postTimeLocal', 'postTimeText'
+      ], '');
+      if (payloadPostTime) cachedPostTime = payloadPostTime;
 
       let urlData = parseTwinSpiresUrl();
       if (urlData) {
@@ -698,7 +1160,8 @@
         if (payloadRace) cachedRaceNum = payloadRace;
 
         let statRows = parseStatsRows(statsObj);
-        cachedStatsCsv = statRows.map(r => Object.values(r).join(',')).join('\n');
+        let statsHeader = Object.keys(statRows[0]).join(',');
+        cachedStatsCsv = `${statsHeader}\n${statRows.map(r => Object.values(r).join(',')).join('\n')}`;
         updateOverlay();
       }
     } catch(e) {}
@@ -725,6 +1188,7 @@
     };
   }
 
+  startCollectionTicker();
   updateOverlay();
-  console.log("🚀 Live Handicapping Model V16 Engine Running!");
+  console.log("🚀 Live Handicapping Model V24 Running with 30s Comments Timeout Fallback!");
 })();
