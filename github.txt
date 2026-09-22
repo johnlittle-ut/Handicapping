@@ -1,0 +1,99 @@
+HTML
+_______
+
+
+
+
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#007bff">
+  <title>My Mobile App</title>
+  
+  <!-- Links the Manifest file -->
+  <link rel="manifest" href="./manifest.json">
+</head>
+<body>
+
+  <h1>My App Works!</h1>
+  <p>This app runs offline and can be installed on your home screen.</p>
+
+  <!-- Registers the Service Worker -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js')
+          .then((reg) => console.log('Service Worker registered successfully:', reg))
+          .catch((err) => console.error('Service Worker registration failed:', err));
+      });
+    }
+  </script>
+</body>
+</html>
+
+
+
+
+
+JSON________
+_______________________
+
+
+{
+  "name": "My Custom App",
+  "short_name": "MyApp",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#007bff",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
+
+
+
+
+
+JS_____
+__________________________
+const CACHE_NAME = 'app-cache-v1';
+const ASSETS_TO_CACHE = [
+  './',
+  './index.html',
+  './manifest.json',
+  './icon-192.png',
+  './icon-512.png'
+];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => {
+      return cache.addAll(ASSETS_TO_CACHE);
+    })
+  );
+});
+
+self.addEventListener('fetch', (event) => {
+  event.respondWith(
+    caches.match(event.request).then((cachedResponse) => {
+      return cachedResponse || fetch(event.request);
+    })
+  );
+});
+
+
