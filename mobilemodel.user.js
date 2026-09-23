@@ -16,7 +16,7 @@
   let isOverlayVisible = true;
 
   // Embedded Horse Image URL / Base64 Data String
-const HORSE_IMAGE_URL = 'https://raw.githubusercontent.com/littlejohn2201/handicapping2.0/blob/main/apple-touch-icon.png';
+const HORSE_IMAGE_URL = 'https://raw.githubusercontent.com/littlejohn2201/handicapping2.0/main/apple-touch-icon.png';
 
   // Loader, Tab & Calculation Tracking State
   const REQUIRED_TABS = ['Summary', 'Advanced', 'Speed', 'Class', 'Pace', 'Comments'];
