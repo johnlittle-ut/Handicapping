@@ -1,4 +1,4 @@
-This is a handicapping model build as an extension to the TwinSpires web page. There is one for the windows desktop (I used Microsoft Edge dev tools) and one for iPhone Safari. 
+This is a handicapping model built as an extension to the TwinSpires web page. There is one for the windows desktop (I used Microsoft Edge dev tools) and one for iPhone Safari. 
 
 Instructions for Windows:
   -open TwinSpires and log in to your account
