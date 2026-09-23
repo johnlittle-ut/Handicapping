@@ -15,6 +15,35 @@
     'Comments': false
   };
 
+  function applyLeftAlignmentCSS() {
+    if (!document.getElementById('ts-left-align-style')) {
+      const style = document.createElement('style');
+      style.id = 'ts-left-align-style';
+      style.textContent = `
+        /* Maintain natural full-width body canvas */
+        html, body {
+          width: 100% !important;
+          max-width: none !important;
+          overflow-x: auto !important;
+        }
+
+        /* Left-align top-level layout containers while keeping a 20px left margin gap */
+        #root > div, 
+        #app > div, 
+        main, 
+        header, 
+        nav,
+        div[class*="PageLayout"], 
+        div[class*="MainLayout"],
+        div[class*="Container-"] {
+          margin-left: 20px !important;
+          margin-right: auto !important;
+        }
+      `;
+      document.head.appendChild(style);
+    }
+  }
+
   let isLoaderVisible = true;
   let isCalculating = false;
   let calcProgressPercent = 0;
@@ -605,12 +634,16 @@
     let wWeek = 0.0, wMeet = 1.0;
     let ruleAppliedMsg = "";
 
-    if (weekRaces < 15) {
-      wWeek = 0.00; wMeet = 1.00;
-      ruleAppliedMsg = `[Rule Applied] Using 100% Meet stats (Week sample too small: ${Math.round(weekRaces)} < 15 races)`;
-    } else {
+    // Updated Week vs Meet blend threshold rules
+    if (weekRaces >= 15) {
       wWeek = 0.65; wMeet = 0.35;
       ruleAppliedMsg = `[Rule Applied] Blending 65% Week / 35% Meet (Week sample sufficient: ${Math.round(weekRaces)} >= 15 races)`;
+    } else if (weekRaces >= 7) {
+      wWeek = 0.20; wMeet = 0.80;
+      ruleAppliedMsg = `[Rule Applied] Blending 20% Week / 80% Meet (${Math.round(weekRaces)} week races)`;
+    } else {
+      wWeek = 0.00; wMeet = 1.00;
+      ruleAppliedMsg = `[Rule Applied] Using 100% Meet stats (Week sample too small: ${Math.round(weekRaces)} < 7 races)`;
     }
 
     let isWet = isHeavyWetTrack(cachedTrackCondition);
@@ -633,11 +666,12 @@
       "S": Math.round(((wWeek * weekIV.S) + (wMeet * meetIV.S)) * 100) / 100
     };
 
+    // Updated Churchill Downs baseline weights: W_Trainer increased to 0.11 (+0.03), W_Distance reduced to 0.08 (-0.03)
     const weightsDict = {
       'Thoroughbred': { W_Speed: 0.18, W_Power: 0.10, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.06, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Market: 0.03 },
       'Harness': { W_Speed: 0.16, W_Power: 0.07, W_Class: 0.13, W_Distance: 0.04, W_Driver: 0.18, W_Trainer: 0.06, W_Early: 0.18, W_Finish: 0.08, W_Recency: 0.04, W_Market: 0.03 },
       'Quarter Horse': { W_Speed: 0.26, W_Power: 0.10, W_Class: 0.09, W_Distance: 0.02, W_Driver: 0.07, W_Trainer: 0.07, W_Early: 0.34, W_Finish: 0.00, W_Recency: 0.02, W_Market: 0.03 },
-      'Churchill Downs': { W_Speed: 0.16, W_Power: 0.09, W_Class: 0.17, W_Distance: 0.11, W_Driver: 0.08, W_Trainer: 0.08, W_Early: 0.11, W_Finish: 0.12, W_Recency: 0.03, W_Market: 0.03 }
+      'Churchill Downs': { W_Speed: 0.16, W_Power: 0.09, W_Class: 0.17, W_Distance: 0.08, W_Driver: 0.08, W_Trainer: 0.11, W_Early: 0.11, W_Finish: 0.12, W_Recency: 0.03, W_Market: 0.03 }
     };
 
     let activeWeights = Object.assign({}, cleanTrack === 'Churchill Downs' ? weightsDict['Churchill Downs'] : (weightsDict[cleanBreed] || weightsDict['Thoroughbred']));
@@ -1189,6 +1223,7 @@
   }
 
   startCollectionTicker();
+  applyLeftAlignmentCSS();
   updateOverlay();
-  console.log("🚀 Live Handicapping Model V24 Running with 30s Comments Timeout Fallback!");
+  console.log("Live Handicapping Model V24 Running with 30s Comments Timeout Fallback!");
 })();
