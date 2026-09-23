@@ -5,14 +5,16 @@
   let dragOffsetY = 0;
 
   // Loader, Tab & Calculation Tracking State
-  const REQUIRED_TABS = ['Summary', 'Advanced', 'Speed', 'Class', 'Pace', 'Comments'];
+  const REQUIRED_TABS = ['Summary', 'Advanced', 'Speed', 'Class', 'Pace', 'Comments', 'Pools', 'Probables'];
   let loadedTabs = {
     'Summary': false,
     'Advanced': false,
     'Speed': false,
     'Class': false,
     'Pace': false,
-    'Comments': false
+    'Comments': false,
+    'Pools': false,
+    'Probables': false
   };
 
   function applyLeftAlignmentCSS() {
@@ -20,14 +22,12 @@
       const style = document.createElement('style');
       style.id = 'ts-left-align-style';
       style.textContent = `
-        /* Maintain natural full-width body canvas */
         html, body {
           width: 100% !important;
           max-width: none !important;
           overflow-x: auto !important;
         }
 
-        /* Left-align top-level layout containers while keeping a 20px left margin gap */
         #root > div, 
         #app > div, 
         main, 
@@ -60,7 +60,6 @@
       loadedTabs['Comments'] = true;
     }
 
-    // 30-Second Fallback: If 30 seconds have passed without comments, bypass Comments tab requirement
     if (!loadedTabs['Comments'] && (Date.now() - collectionStartTime) >= 30000) {
       loadedTabs['Comments'] = true;
     }
@@ -132,7 +131,6 @@
     cachedPostTime = "N/A";
     REQUIRED_TABS.forEach(tab => loadedTabs[tab] = false);
     
-    // Reset loader, calculation & timer state
     isLoaderVisible = true;
     isCalculating = false;
     calcProgressPercent = 0;
@@ -184,7 +182,6 @@
     document.addEventListener('mouseup', commitZoom);
     document.addEventListener('touchend', commitZoom);
 
-    // Global Click Handler for TwinSpires Website Program Tabs
     document.addEventListener('click', function(e) {
       if (!e.target) return;
 
@@ -271,7 +268,8 @@
   const ROUTE_IGNORE_LIST = [
     'bet', 'bets', 'betting', 'race', 'races', 'handicapping', 
     'today', 'summary', 'entries', 'results', 'overview', 
-    'brisnet', 'track', 'tracks', 'speed', 'pace', 'class', 'program', 'classic'
+    'brisnet', 'track', 'tracks', 'speed', 'pace', 'class', 'program', 'classic',
+    'pools', 'probables'
   ];
 
   function isHeavyWetTrack(condVal) {
@@ -440,25 +438,24 @@
   function parseAndMergeRunnerRow(r) {
     if (!r || typeof r !== 'object') return null;
 
-    let runnerCond = getStr(r, ['trackCondition', 'condition', 'surfaceCondition'], '');
-    if (runnerCond) cachedTrackCondition = runnerCond;
-
     let rawName = getStr(r, ['name', 'horseName'], '').replace(/"/g, '');
     let prog = getStr(r, ['programNumber', 'postPosition'], '1');
     let post = getVal(r, ['postPosition', 'programNumber'], parseInt(prog) || 1);
 
+    // Direct Boolean Check for Scratched Runners
     let isScratched = r.scratched === true || 
-                      String(r.scratched).toLowerCase() === 'true' || 
                       r.isScratched === true || 
+                      String(r.scratched).toLowerCase() === 'true' || 
                       getStr(r, ['scratchStatus', 'status'], '').toLowerCase() === 'scratched';
 
     if (isScratched) {
-      delete cachedHorsesMap[prog];
       cachedScratchedMap[prog] = rawName || prog;
-      return null;
     } else {
       delete cachedScratchedMap[prog];
     }
+
+    let runnerCond = getStr(r, ['trackCondition', 'condition', 'surfaceCondition'], '');
+    if (runnerCond) cachedTrackCondition = runnerCond;
 
     let posComm = getStr(r, ['commentsPositive', 'positiveComments', 'commentPositive'], '').replace(/"/g, "'");
     let negComm = getStr(r, ['commentsNegative', 'negativeComments', 'commentNegative'], '').replace(/"/g, "'");
@@ -471,6 +468,7 @@
       PROGRAM: prog,
       HORSE_NAME: rawName ? `"${rawName}"` : '""',
       POST: post,
+      IS_SCRATCHED: isScratched,
       ML_ODDS: getStr(r, ['morningLineOdds', 'mlOdds'], ''),
       LIVE_ODDS: getStr(r, ['liveOdds', 'currentOdds', 'odds'], ''),
       RUN_STYLE: getStr(r, ['priorRunStyle', 'runStyle'], '').toUpperCase(),
@@ -502,7 +500,9 @@
 
     for (let key in freshData) {
       let val = freshData[key];
-      if (key === 'HORSE_NAME') {
+      if (key === 'IS_SCRATCHED') {
+        if (val === true) existing[key] = true;
+      } else if (key === 'HORSE_NAME') {
         if (val !== '""' && val !== '"Unknown"') existing[key] = val;
       } else if (typeof val === 'number') {
         if (val !== 0 || existing[key] === undefined) existing[key] = val;
@@ -515,7 +515,7 @@
 
   function getFormattedHorsesCsv() {
     let keys = Object.keys(cachedHorsesMap);
-    if (keys.length === 0) return "Awaiting Active Horse Data...";
+    if (keys.length === 0) return "Awaiting Horse Data...";
     let sorted = keys.map(k => cachedHorsesMap[k]).sort((a, b) => {
       let numA = parseInt(String(a.PROGRAM).replace(/\D/g, ''), 10) || 0;
       let numB = parseInt(String(b.PROGRAM).replace(/\D/g, ''), 10) || 0;
@@ -597,10 +597,9 @@
       'Thoroughbred': { W_Speed: 0.18, W_Power: 0.10, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.06, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Market: 0.03 },
       'Harness': { W_Speed: 0.16, W_Power: 0.07, W_Class: 0.13, W_Distance: 0.04, W_Driver: 0.18, W_Trainer: 0.06, W_Early: 0.18, W_Finish: 0.08, W_Recency: 0.04, W_Market: 0.03 },
       'Quarter Horse': { W_Speed: 0.26, W_Power: 0.10, W_Class: 0.09, W_Distance: 0.02, W_Driver: 0.07, W_Trainer: 0.07, W_Early: 0.34, W_Finish: 0.00, W_Recency: 0.02, W_Market: 0.03 },
-      'Special': { W_Speed: 0.16, W_Power: 0.09, W_Class: 0.17, W_Distance: 0.08, W_Driver: 0.08, W_Trainer: 0.11, W_Early: 0.11, W_Finish: 0.12, W_Recency: 0.03, W_Market: 0.03 }
+      'Special': { W_Speed: 0.18, W_Power: 0.10, W_Class: 0.15, W_Distance: 0.08, W_Driver: 0.07, W_Trainer: 0.08, W_Early: 0.14, W_Finish: 0.11, W_Recency: 0.03, W_Market: 0.06 }
     };
 
-    // Check if current track qualifies for 'Special' weights (Churchill Downs or Horseshoe Indianapolis)
     let isSpecialTrack = cleanTrack.toLowerCase().includes('churchill') || 
                          cleanTrack.toLowerCase().includes('horseshoe indianapolis') || 
                          cleanTrack.toLowerCase().includes('indiana grand');
@@ -747,6 +746,7 @@
       let mlDec = parseOddsToDecimal(r.ML_ODDS);
       let liveDec = parseOddsToDecimal(r.LIVE_ODDS);
       let finalOddsDec = !isNaN(liveDec) && liveDec > 0 ? liveDec : mlDec;
+      r.ODDS_NUMERIC = finalOddsDec;
 
       let avgDist = parseFloat(r.AVG_DIST_SPD) || 0;
       let spdLr = parseFloat(r.SPD_LR) || 0;
@@ -807,18 +807,33 @@
       r.BASE_SKILL = Math.round(baseSkill * 100) / 100;
       r.POST_BONUS = postBonus;
       r.STYLE_BONUS = styleBonus;
-      r.FINAL_SCORE = Math.round((baseSkill + postBonus + styleBonus + powerBonus) * 100) / 100;
+
+      // Calculate candidate final score
+      let calculatedScore = Math.round((baseSkill + postBonus + styleBonus + powerBonus) * 100) / 100;
+
+      // Zero out final score at the very end if scratched
+      if (r.IS_SCRATCHED === true || cachedScratchedMap[r.PROGRAM]) {
+        r.FINAL_SCORE = 0;
+      } else {
+        r.FINAL_SCORE = calculatedScore;
+      }
     });
 
     runners.sort((a, b) => b.FINAL_SCORE - a.FINAL_SCORE);
     runners.forEach((r, idx) => { r.RANK = idx + 1; });
 
     let topField = runners.slice(0, 5);
-    let s1 = topField[0] ? topField[0].FINAL_SCORE : 0;
-    let s2 = topField[1] ? topField[1].FINAL_SCORE : 0;
-    let s3 = topField[2] ? topField[2].FINAL_SCORE : 0;
-    let s4 = topField[3] ? topField[3].FINAL_SCORE : 0;
-    let s5 = topField[4] ? topField[4].FINAL_SCORE : 0;
+    let top1 = topField[0];
+    let top2 = topField[1];
+    let top3 = topField[2];
+    let top4 = topField[3];
+    let top5 = topField[4];
+
+    let s1 = top1 ? top1.FINAL_SCORE : 0;
+    let s2 = top2 ? top2.FINAL_SCORE : 0;
+    let s3 = top3 ? top3.FINAL_SCORE : 0;
+    let s4 = top4 ? top4.FINAL_SCORE : 0;
+    let s5 = top5 ? top5.FINAL_SCORE : 0;
 
     let gap12 = Math.round((s1 - s2) * 100) / 100;
     let gap23 = Math.round((s2 - s3) * 100) / 100;
@@ -828,48 +843,98 @@
     let gap13 = Math.round((s1 - s3) * 100) / 100;
     let gap14 = Math.round((s1 - s4) * 100) / 100;
 
-    let p1 = topField[0] ? topField[0].PROGRAM : "N/A";
-    let p2 = topField[1] ? topField[1].PROGRAM : "N/A";
-    let p3 = topField[2] ? topField[2].PROGRAM : "N/A";
-    let p4 = topField[3] ? topField[3].PROGRAM : "N/A";
+    let p1 = top1 ? top1.PROGRAM : "N/A";
+    let p2 = top2 ? top2.PROGRAM : "N/A";
+    let p3 = top3 ? top3.PROGRAM : "N/A";
+    let p4 = top4 ? top4.PROGRAM : "N/A";
+
+    let odds1 = top1 && !isNaN(top1.ODDS_NUMERIC) ? top1.ODDS_NUMERIC : NaN;
+    let odds2 = top2 && !isNaN(top2.ODDS_NUMERIC) ? top2.ODDS_NUMERIC : NaN;
 
     let scenario = "", optionA = "", optionB = "", optionC = null;
+    let isChurchill = cleanTrack.toLowerCase().includes("churchill") || cleanTrack.toLowerCase() === "cd";
 
-    if (gap14 < 5.0 && runners.length >= 4) {
-      scenario = "Ultra-Tight Field / High Chaos (Top 4 within 5.0 pts)";
-      optionA = `PASS / NO BET (Or Value WIN Wager on highest live odds among #${p1}, #${p2}, #${p3})`;
-      optionB = `3-Horse Exacta Box: #${p1}, #${p2}, #${p3} (6 combos / low cost)`;
-    } else if (gap12 >= 8.0) {
-      scenario = `Dominant Standout (#${p1} holds >=8.0 pt lead)`;
-      optionA = `WIN Wager on #${p1}`;
-      optionB = (gap23 < 4.0 && gap34 >= 4.0) 
-        ? `Straight Exacta: #${p1} / #${p2}, #${p3}`
-        : `Straight Exacta: #${p1} / #${p2} (Or Exacta Key: #${p1} / #${p2}, #${p3}, #${p4})`;
-    } else if (gap12 < 8.0 && gap23 >= 4.0) {
-      scenario = `Competitive Top Duo (#${p1} & #${p2} separated from field)`;
-      optionA = `WIN Wager on #${p1} (Or PLACE Wager on #${p2})`;
-      optionB = `Exacta Box: #${p1}, #${p2}`;
-    } else if (gap13 < 4.0) {
-      scenario = `Volatile Top Group (Top 3 within 4.0 pts: #${p1}, #${p2}, #${p3})`;
-      optionA = `PLACE / SHOW Wager on highest live odds among #${p1}, #${p2}, #${p3}`;
-      optionB = `Trifecta Box: #${p1}, #${p2}, #${p3} (6 combos / $3.00 total at $0.50 base)`;
-    } else {
+    let oddCount = 0, evenCount = 0;
+    topField.slice(0, 4).forEach(r => {
+      let pNum = parseInt(String(r.PROGRAM).replace(/\D/g, ''), 10);
+      if (!isNaN(pNum)) {
+        if (pNum % 2 !== 0) oddCount++;
+        else evenCount++;
+      }
+    });
+
+    if (gap12 < 1.5 && gap23 < 1.5) {
+      scenario = "Tier 4: Ultra-Competitive / Tight Field (Gap_1_2 < 1.5 & Gap_2_3 < 1.5)";
+      if (isChurchill && (oddCount >= 3 || evenCount >= 3)) {
+        let prefSide = oddCount >= 3 ? "ODD" : "EVEN";
+        optionA = "$0 (PASS / NO BET - Tight Field Capital Protection)";
+        optionB = `$2 Odd/Even Bet on [${prefSide}] (Churchill Special Exception: ${Math.max(oddCount, evenCount)} of top 4 picks are ${prefSide})`;
+      } else {
+        optionA = "$0 (PASS / NO BET - Capital Protection Rule)";
+        optionB = `3-Horse Exacta Box: #${p1}, #${p2}, #${p3} (6 combos / low cost speculative only)`;
+      }
+    } 
+    else if (gap12 >= 5.0) {
+      scenario = `Tier 1: Dominant Top Pick (#${p1} Gap_1_2 = ${gap12.toFixed(1)})`;
+      
+      if (!isNaN(odds1) && odds1 >= 2.0) {
+        if (gap12 >= 7.0 && odds1 >= 3.0) {
+          optionA = `$4 WIN on #${p1} (Max Value Overlay: Gap >= 7.0 & Odds >= 3/1)`;
+        } else if (odds1 >= 3.0) {
+          optionA = `$4 WIN on #${p1} (High Value Overlay: Odds >= 3/1)`;
+        } else {
+          optionA = `$3 WIN on #${p1} (Dominant Lead with Fair 2/1 to 3/1 Odds)`;
+        }
+        optionB = `Straight Exacta: #${p1} / #${p2}, #${p3}`;
+      } else {
+        let estExactaPayout = (!isNaN(odds1) && !isNaN(odds2) && odds1 > 0 && odds2 > 0) 
+          ? ((odds1 + 1) * (odds2 + 1) * 2.0) 
+          : 0;
+
+        if (estExactaPayout >= 8.0) {
+          optionA = `$2 Straight Exacta: #${p1} over #${p2} (Exacta Pivot: Est. Payout $${estExactaPayout.toFixed(2)} >= $8.00)`;
+          optionB = `$2 or $3 PLACE on #${p2} (Secondary Value Pivot)`;
+        } else if (!isNaN(odds2) && odds2 >= 2.0) {
+          optionA = `$2 PLACE on #${p2} (Place Pivot: #${p2} offers fair value while #${p1} is low-payout)`;
+          optionB = `$2 Straight Exacta: #${p1} / #${p2}, #${p3}`;
+        } else if (!isNaN(odds1) && odds1 <= 0.5) {
+          optionA = "$0 (PASS / NO BET) - Heavy favorite (< 6/5 odds) with no exotic value";
+          optionB = `Exacta Key: #${p1} / #${p2}, #${p3}`;
+        } else {
+          optionA = `$2 PLACE on #${p1} (Safety Pivot on low Win odds)`;
+          optionB = `Exacta Key: #${p1} / #${p2}, #${p3}`;
+        }
+      }
+    } 
+    else if (gap12 >= 2.0 && gap12 < 5.0) {
+      scenario = `Tier 2: Moderate Lead (#${p1} Gap_1_2 = ${gap12.toFixed(1)})`;
+      
+      if (!isNaN(odds1) && odds1 >= 3.0) {
+        optionA = `$2 WIN on #${p1} (Odds >= 3/1 justify moderate risk)`;
+        optionB = `Exacta Box: #${p1}, #${p2}`;
+      } else {
+        optionA = `$2 PLACE on #${p1} (Safety First Pivot: Odds < 3/1 without massive score lead)`;
+        optionB = `Exacta Box: #${p1}, #${p2}`;
+      }
+    } 
+    else if (gap12 < 2.0 && gap23 >= 4.0) {
+      scenario = `Tier 3: Split Top Two (#${p1} & #${p2} separated from field)`;
+      
+      let higherOddsPick = (!isNaN(odds2) && !isNaN(odds1) && odds2 > odds1) ? p2 : p1;
+      let higherOddsVal = (!isNaN(odds2) && !isNaN(odds1) && odds2 > odds1) ? odds2 : odds1;
+
+      optionA = `$2 Exacta Box: #${p1}, #${p2} ($1 base = $2 total, covers both permutations)`;
+      optionB = `$2 PLACE on #${higherOddsPick} (Exploiting market inefficiency on under-bet pick: ${higherOddsVal > 0 ? higherOddsVal.toFixed(1) + '/1' : 'higher odds'})`;
+    } 
+    else {
       scenario = "Standard Competitive Field";
-      optionA = `WIN / PLACE Wager on #${p1}`;
-      optionB = `Straight Exacta Wheel: #${p1} / #${p2}, #${p3}`;
+      optionA = (!isNaN(odds1) && odds1 >= 3.0) ? `$2 WIN on #${p1}` : `$2 PLACE on #${p1}`;
+      optionB = `Exacta Box: #${p1}, #${p2}`;
     }
 
-    if (cleanTrack.toLowerCase().includes("churchill") && runners.length >= 6) {
-      let oddSum = 0, evenSum = 0;
-      topField.forEach(r => {
-        let pNum = parseInt(r.PROGRAM.replace(/\D/g, ''), 10);
-        if (!isNaN(pNum)) {
-          if (pNum % 2 !== 0) oddSum += r.FINAL_SCORE;
-          else evenSum += r.FINAL_SCORE;
-        }
-      });
-      let pref = oddSum >= evenSum ? "ODD" : "EVEN";
-      optionC = `CHURCHILL ODD/EVEN WAGER: Bet [${pref}] (Score Weight: ${Math.max(oddSum, evenSum).toFixed(2)} vs ${Math.min(oddSum, evenSum).toFixed(2)})`;
+    if (isChurchill && runners.length >= 4 && !optionC) {
+      let pref = oddCount >= evenCount ? "ODD" : "EVEN";
+      optionC = `CHURCHILL ODD/EVEN WAGER: $2 Bet on [${pref}] (${Math.max(oddCount, evenCount)} of top 4 picks are ${pref})`;
     }
 
     return {
@@ -1061,8 +1126,8 @@
 
     let trackDisplay = getActiveTrackName().toUpperCase().replace(/"/g, '');
     let raceDisplay = String(getActiveRaceNum()).replace(/[^0-9]/g, '');
-    let activeStartersCount = Object.keys(cachedHorsesMap).length;
-    let scratchedHorsesCount = Object.keys(cachedScratchedMap).length;
+    let activeStartersCount = Object.values(cachedHorsesMap).filter(h => !h.IS_SCRATCHED && !cachedScratchedMap[h.PROGRAM]).length;
+    let scratchedHorsesCount = Object.values(cachedHorsesMap).filter(h => h.IS_SCRATCHED || cachedScratchedMap[h.PROGRAM]).length;
     let currentDate = new Date().toISOString().split('T')[0];
     let condTag = cachedTrackCondition ? ` (${cachedTrackCondition.toUpperCase()})` : '';
 
@@ -1071,7 +1136,8 @@
     let leaderboardHtml = modelRes.leaderboard.map(h => {
       let nameStr = h.HORSE_NAME.replace(/"/g, '');
       let pwrBonusStr = h.POWER_BONUS > 0 ? ` + Pwr: ${h.POWER_BONUS.toFixed(2)}` : '';
-      return `R${h.RANK} | #${h.PROGRAM} ${nameStr} | Final: ${h.FINAL_SCORE.toFixed(2)} = Base: ${h.BASE_SKILL.toFixed(2)} + Post: ${h.POST_BONUS.toFixed(2)} + Style: ${h.STYLE_BONUS.toFixed(2)}${pwrBonusStr}`;
+      let scratchedTag = (h.IS_SCRATCHED || cachedScratchedMap[h.PROGRAM]) ? ' [SCRATCHED]' : '';
+      return `R${h.RANK} | #${h.PROGRAM} ${nameStr}${scratchedTag} | Final: ${h.FINAL_SCORE.toFixed(2)} = Base: ${h.BASE_SKILL.toFixed(2)} + Post: ${h.POST_BONUS.toFixed(2)} + Style: ${h.STYLE_BONUS.toFixed(2)}${pwrBonusStr}`;
     }).join('\n');
 
     let gapHtml = modelRes.leaderboard.slice(0, 5).map((h, i, arr) => {
@@ -1119,8 +1185,8 @@
         <div style="color:#f59e0b;font-weight:bold;margin-bottom:2px;">--- WAGER RECOMMENDATIONS ---</div>
         <div style="background:#0f172a;padding:6px;border-radius:4px;color:#38bdf8;font-size:10px;">
           <b>Scenario:</b> ${modelRes.wagerRecs.scenario}<br/><br/>
-          <b>OPTION A (Straight Focus):</b><br/> ${modelRes.wagerRecs.optionA}<br/><br/>
-          <b>OPTION B (Exotic Payout):</b><br/> ${modelRes.wagerRecs.optionB}
+          <b>OPTION A (Primary Wager):</b><br/> ${modelRes.wagerRecs.optionA}<br/><br/>
+          <b>OPTION B (Secondary / Exotic):</b><br/> ${modelRes.wagerRecs.optionB}
           ${modelRes.wagerRecs.optionC ? `<br/><br/><b>OPTION C (Churchill Special):</b><br/> ${modelRes.wagerRecs.optionC}` : ''}
         </div>
       </div>
@@ -1131,7 +1197,7 @@
 
       <div style="background:#1f2937;padding:8px;border-radius:6px;border:1px dashed #4b5563;">
         <div style="color:#9ca3af;font-weight:bold;margin-bottom:4px;font-size:10px;">AUDIT SECTION (RAW EXTRACTED CSVs)</div>
-        <div style="color:#f59e0b;font-weight:bold;margin-bottom:2px;">--- ALL ACTIVE HORSES CSV ---</div>
+        <div style="color:#f59e0b;font-weight:bold;margin-bottom:2px;">--- ALL HORSES CSV ---</div>
         <div style="background:#111827;padding:4px;border-radius:4px;word-break:break-all;white-space:pre-wrap;margin-bottom:6px;color:#34d399;max-height:100px;overflow-y:auto;font-size:9px;">${getFormattedHorsesCsv()}</div>
         <div style="color:#f59e0b;font-weight:bold;margin-bottom:2px;">--- RACE STATS ROWS ---</div>
         <div style="background:#111827;padding:4px;border-radius:4px;word-break:break-all;white-space:pre-wrap;color:#60a5fa;font-size:9px;">${cachedStatsCsv}</div>
@@ -1222,5 +1288,5 @@
   startCollectionTicker();
   applyLeftAlignmentCSS();
   updateOverlay();
-  console.log("Live Handicapping Model V25 Running with 'Special' Track Weights (Churchill Downs & Horseshoe Indy)!");
+  console.log("Live Handicapping Model V25 Running - Scratched horses zeroed post-calculation!");
 })();
