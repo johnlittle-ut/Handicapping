@@ -6,7 +6,7 @@
 // @match        https://*.twinspires.com/*
 // @run-at       document-end
 // @grant        none
-// ==UserScript==
+// ==/UserScript==
 
 (function launchTwinSpiresMobileModelV1() {
   let currentZoom = 1.0;
