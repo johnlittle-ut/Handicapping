@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TwinSpires Mobile Handicapper
 // @namespace    http://tampermonkey.net/
-// @version      1.0
-// @description  Floating Handicapping Overlay for TwinSpires
+// @version      1.1
+// @description  Floating Handicapping Overlay for TwinSpires Mobile
 // @match        https://*.twinspires.com/*
 // @run-at       document-end
 // @grant        none
@@ -16,7 +16,7 @@
   let isOverlayVisible = true;
 
   // Embedded Horse Image URL / Base64 Data String
-const HORSE_IMAGE_URL = 'https://raw.githubusercontent.com/littlejohn2201/handicapping2.0/main/apple-touch-icon.png';
+  const HORSE_IMAGE_URL = 'https://raw.githubusercontent.com/littlejohn2201/handicapping2.0/main/apple-touch-icon.png';
 
   // Loader, Tab & Calculation Tracking State
   const REQUIRED_TABS = ['Summary', 'Advanced', 'Speed', 'Class', 'Pace', 'Comments'];
@@ -248,7 +248,6 @@ const HORSE_IMAGE_URL = 'https://raw.githubusercontent.com/littlejohn2201/handic
     window.__tsEventListenerAttached = true;
   }
 
-  // 1. Strict CSS Injection with !important overrides to neutralize host styles
   function injectToggleStyles() {
     let style = document.getElementById('ts-toggle-btn-styles');
     if (!style) {
@@ -314,7 +313,6 @@ const HORSE_IMAGE_URL = 'https://raw.githubusercontent.com/littlejohn2201/handic
     `;
   }
 
-  // 2. Pure Icon Rendering
   function renderToggleButton() {
     injectToggleStyles();
 
@@ -636,6 +634,21 @@ const HORSE_IMAGE_URL = 'https://raw.githubusercontent.com/littlejohn2201/handic
     let cleanTrack = getActiveTrackName();
     let cleanBreed = cachedBreed || "Thoroughbred";
 
+    const weightsDict = {
+      'Thoroughbred': { W_Speed: 0.18, W_Power: 0.10, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.06, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Market: 0.03 },
+      'Harness': { W_Speed: 0.16, W_Power: 0.07, W_Class: 0.13, W_Distance: 0.04, W_Driver: 0.18, W_Trainer: 0.06, W_Early: 0.18, W_Finish: 0.08, W_Recency: 0.04, W_Market: 0.03 },
+      'Quarter Horse': { W_Speed: 0.26, W_Power: 0.10, W_Class: 0.09, W_Distance: 0.02, W_Driver: 0.07, W_Trainer: 0.07, W_Early: 0.34, W_Finish: 0.00, W_Recency: 0.02, W_Market: 0.03 },
+      'Special': { W_Speed: 0.16, W_Power: 0.09, W_Class: 0.17, W_Distance: 0.08, W_Driver: 0.08, W_Trainer: 0.11, W_Early: 0.11, W_Finish: 0.12, W_Recency: 0.03, W_Market: 0.03 }
+    };
+
+    // Check if current track qualifies for 'Special' weights (Churchill Downs or Horseshoe Indianapolis)
+    let isSpecialTrack = cleanTrack.toLowerCase().includes('churchill') || 
+                         cleanTrack.toLowerCase().includes('horseshoe indianapolis') || 
+                         cleanTrack.toLowerCase().includes('indiana grand');
+
+    let activeWeightKey = isSpecialTrack ? 'Special' : (weightsDict[cleanBreed] ? cleanBreed : 'Thoroughbred');
+    let activeWeights = Object.assign({}, weightsDict[activeWeightKey]);
+
     let weekRaces = 0, meetRaces = 100;
     let weekBias = 0, meetBias = 0;
     let weekIV = { RAIL: 1.0, "1-3": 1.0, "4-7": 1.0, "8+": 1.0, E: 1.0, EP: 1.0, P: 1.0, S: 1.0 };
@@ -676,13 +689,18 @@ const HORSE_IMAGE_URL = 'https://raw.githubusercontent.com/littlejohn2201/handic
     let wWeek = 0.0, wMeet = 1.0;
     let ruleAppliedMsg = "";
 
-    if (weekRaces < 15) {
-      wWeek = 0.00; wMeet = 1.00;
-      ruleAppliedMsg = `[Rule Applied] Using 100% Meet stats (Week sample too small: ${Math.round(weekRaces)} < 15 races)`;
-    } else {
+    if (weekRaces >= 15) {
       wWeek = 0.65; wMeet = 0.35;
       ruleAppliedMsg = `[Rule Applied] Blending 65% Week / 35% Meet (Week sample sufficient: ${Math.round(weekRaces)} >= 15 races)`;
+    } else if (weekRaces >= 7) {
+      wWeek = 0.20; wMeet = 0.80;
+      ruleAppliedMsg = `[Rule Applied] Blending 20% Week / 80% Meet (${Math.round(weekRaces)} week races)`;
+    } else {
+      wWeek = 0.00; wMeet = 1.00;
+      ruleAppliedMsg = `[Rule Applied] Using 100% Meet stats (Week sample too small: ${Math.round(weekRaces)} < 7 races)`;
     }
+
+    ruleAppliedMsg += ` | [Weight Set: ${activeWeightKey}]`;
 
     let isWet = isHeavyWetTrack(cachedTrackCondition);
     if (isWet) {
@@ -703,15 +721,6 @@ const HORSE_IMAGE_URL = 'https://raw.githubusercontent.com/littlejohn2201/handic
       "P": Math.round(((wWeek * weekIV.P) + (wMeet * meetIV.P)) * 100) / 100,
       "S": Math.round(((wWeek * weekIV.S) + (wMeet * meetIV.S)) * 100) / 100
     };
-
-    const weightsDict = {
-      'Thoroughbred': { W_Speed: 0.18, W_Power: 0.10, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.06, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Market: 0.03 },
-      'Harness': { W_Speed: 0.16, W_Power: 0.07, W_Class: 0.13, W_Distance: 0.04, W_Driver: 0.18, W_Trainer: 0.06, W_Early: 0.18, W_Finish: 0.08, W_Recency: 0.04, W_Market: 0.03 },
-      'Quarter Horse': { W_Speed: 0.26, W_Power: 0.10, W_Class: 0.09, W_Distance: 0.02, W_Driver: 0.07, W_Trainer: 0.07, W_Early: 0.34, W_Finish: 0.00, W_Recency: 0.02, W_Market: 0.03 },
-      'Churchill Downs': { W_Speed: 0.16, W_Power: 0.09, W_Class: 0.17, W_Distance: 0.11, W_Driver: 0.08, W_Trainer: 0.08, W_Early: 0.11, W_Finish: 0.12, W_Recency: 0.03, W_Market: 0.03 }
-    };
-
-    let activeWeights = Object.assign({}, cleanTrack === 'Churchill Downs' ? weightsDict['Churchill Downs'] : (weightsDict[cleanBreed] || weightsDict['Thoroughbred']));
 
     let activeMeetCount = meetRaces;
     let sampleScaleFactor = 0.0;
@@ -891,7 +900,7 @@ const HORSE_IMAGE_URL = 'https://raw.githubusercontent.com/littlejohn2201/handic
       optionB = `Straight Exacta Wheel: #${p1} / #${p2}, #${p3}`;
     }
 
-    if (cleanTrack === "Churchill Downs" && runners.length >= 6) {
+    if (cleanTrack.toLowerCase().includes("churchill") && runners.length >= 6) {
       let oddSum = 0, evenSum = 0;
       topField.forEach(r => {
         let pNum = parseInt(r.PROGRAM.replace(/\D/g, ''), 10);
@@ -1210,5 +1219,5 @@ const HORSE_IMAGE_URL = 'https://raw.githubusercontent.com/littlejohn2201/handic
 
   startCollectionTicker();
   updateOverlay();
-  console.log("🚀 Mobile Handicapping Model V1 Running!");
+  console.log("Mobile Handicapping Model V1.1 Running!");
 })();
