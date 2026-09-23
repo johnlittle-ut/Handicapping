@@ -1,4 +1,4 @@
-(function launchTwinSpiresVariableInspectorV24() {
+(function launchTwinSpiresVariableInspectorV25() {
   let currentZoom = 1.0;
   let isDragging = false;
   let dragOffsetX = 0;
@@ -315,7 +315,6 @@
   function getActivePostTime() {
     if (cachedPostTime && cachedPostTime !== "N/A" && cachedPostTime !== "") return cachedPostTime;
     
-    // Search broader DOM selectors for TwinSpires UI
     let postElem = document.querySelector('[class*="post-time"], [class*="postTime"], [class*="PostTime"], .m-post-time, [data-testid*="post-time"]');
     if (postElem && postElem.innerText) {
       let txt = postElem.innerText.replace(/post time/i, '').trim();
@@ -594,6 +593,21 @@
     let cleanTrack = getActiveTrackName();
     let cleanBreed = cachedBreed || "Thoroughbred";
 
+    const weightsDict = {
+      'Thoroughbred': { W_Speed: 0.18, W_Power: 0.10, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.06, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Market: 0.03 },
+      'Harness': { W_Speed: 0.16, W_Power: 0.07, W_Class: 0.13, W_Distance: 0.04, W_Driver: 0.18, W_Trainer: 0.06, W_Early: 0.18, W_Finish: 0.08, W_Recency: 0.04, W_Market: 0.03 },
+      'Quarter Horse': { W_Speed: 0.26, W_Power: 0.10, W_Class: 0.09, W_Distance: 0.02, W_Driver: 0.07, W_Trainer: 0.07, W_Early: 0.34, W_Finish: 0.00, W_Recency: 0.02, W_Market: 0.03 },
+      'Special': { W_Speed: 0.16, W_Power: 0.09, W_Class: 0.17, W_Distance: 0.08, W_Driver: 0.08, W_Trainer: 0.11, W_Early: 0.11, W_Finish: 0.12, W_Recency: 0.03, W_Market: 0.03 }
+    };
+
+    // Check if current track qualifies for 'Special' weights (Churchill Downs or Horseshoe Indianapolis)
+    let isSpecialTrack = cleanTrack.toLowerCase().includes('churchill') || 
+                         cleanTrack.toLowerCase().includes('horseshoe indianapolis') || 
+                         cleanTrack.toLowerCase().includes('indiana grand');
+
+    let activeWeightKey = isSpecialTrack ? 'Special' : (weightsDict[cleanBreed] ? cleanBreed : 'Thoroughbred');
+    let activeWeights = Object.assign({}, weightsDict[activeWeightKey]);
+
     let weekRaces = 0, meetRaces = 100;
     let weekBias = 0, meetBias = 0;
     let weekIV = { RAIL: 1.0, "1-3": 1.0, "4-7": 1.0, "8+": 1.0, E: 1.0, EP: 1.0, P: 1.0, S: 1.0 };
@@ -634,7 +648,6 @@
     let wWeek = 0.0, wMeet = 1.0;
     let ruleAppliedMsg = "";
 
-    // Updated Week vs Meet blend threshold rules
     if (weekRaces >= 15) {
       wWeek = 0.65; wMeet = 0.35;
       ruleAppliedMsg = `[Rule Applied] Blending 65% Week / 35% Meet (Week sample sufficient: ${Math.round(weekRaces)} >= 15 races)`;
@@ -645,6 +658,8 @@
       wWeek = 0.00; wMeet = 1.00;
       ruleAppliedMsg = `[Rule Applied] Using 100% Meet stats (Week sample too small: ${Math.round(weekRaces)} < 7 races)`;
     }
+
+    ruleAppliedMsg += ` | [Weight Set: ${activeWeightKey}]`;
 
     let isWet = isHeavyWetTrack(cachedTrackCondition);
     if (isWet) {
@@ -665,16 +680,6 @@
       "P": Math.round(((wWeek * weekIV.P) + (wMeet * meetIV.P)) * 100) / 100,
       "S": Math.round(((wWeek * weekIV.S) + (wMeet * meetIV.S)) * 100) / 100
     };
-
-    // Updated Churchill Downs baseline weights: W_Trainer increased to 0.11 (+0.03), W_Distance reduced to 0.08 (-0.03)
-    const weightsDict = {
-      'Thoroughbred': { W_Speed: 0.18, W_Power: 0.10, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.06, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Market: 0.03 },
-      'Harness': { W_Speed: 0.16, W_Power: 0.07, W_Class: 0.13, W_Distance: 0.04, W_Driver: 0.18, W_Trainer: 0.06, W_Early: 0.18, W_Finish: 0.08, W_Recency: 0.04, W_Market: 0.03 },
-      'Quarter Horse': { W_Speed: 0.26, W_Power: 0.10, W_Class: 0.09, W_Distance: 0.02, W_Driver: 0.07, W_Trainer: 0.07, W_Early: 0.34, W_Finish: 0.00, W_Recency: 0.02, W_Market: 0.03 },
-      'Churchill Downs': { W_Speed: 0.16, W_Power: 0.09, W_Class: 0.17, W_Distance: 0.08, W_Driver: 0.08, W_Trainer: 0.11, W_Early: 0.11, W_Finish: 0.12, W_Recency: 0.03, W_Market: 0.03 }
-    };
-
-    let activeWeights = Object.assign({}, cleanTrack === 'Churchill Downs' ? weightsDict['Churchill Downs'] : (weightsDict[cleanBreed] || weightsDict['Thoroughbred']));
 
     let activeMeetCount = meetRaces;
     let sampleScaleFactor = 0.0;
@@ -854,7 +859,7 @@
       optionB = `Straight Exacta Wheel: #${p1} / #${p2}, #${p3}`;
     }
 
-    if (cleanTrack === "Churchill Downs" && runners.length >= 6) {
+    if (cleanTrack.toLowerCase().includes("churchill") && runners.length >= 6) {
       let oddSum = 0, evenSum = 0;
       topField.forEach(r => {
         let pNum = parseInt(r.PROGRAM.replace(/\D/g, ''), 10);
@@ -955,7 +960,6 @@
     let progress = getLoadingProgress();
     let isDataComplete = progress.percent === 100;
 
-    // Trigger 16-second calculation phase when data collection reaches 100%
     if (isDataComplete && !isCalculating && calcProgressPercent === 0) {
       if (collectionTicker) {
         clearInterval(collectionTicker);
@@ -976,7 +980,6 @@
       }, 100);
     }
 
-    // Render Calculation Progress Bar
     if (isCalculating) {
       let secondsLeft = Math.max(0, (16 - (calcProgressPercent * 0.16))).toFixed(1);
       return `
@@ -990,7 +993,6 @@
             Please allow a moment for calculations...
           </div>
 
-          <!-- Progress Bar Container with Running Horse Icon -->
           <div style="position:relative;margin-top:22px;background:#0f172a;border-radius:8px;padding:3px;border:1px solid #334155;">
             <div style="position:absolute;top:-20px;left:${calcProgressPercent}%;transform:translateX(-50%) scaleX(-1);font-size:16px;line-height:1;pointer-events:none;transition:left 0.1s linear;">
               🏇
@@ -1004,7 +1006,6 @@
       `;
     }
 
-    // Render Initial Data Collection Progress
     let elapsedSecs = Math.floor((Date.now() - collectionStartTime) / 1000);
     let timeRemaining = Math.max(0, 30 - elapsedSecs);
 
@@ -1036,7 +1037,6 @@
           ${tabListHtml}
         </div>
 
-        <!-- Progress Bar Container with Running Horse Icon -->
         <div style="position:relative;margin-top:22px;background:#0f172a;border-radius:8px;padding:3px;border:1px solid #334155;">
           <div style="position:absolute;top:-20px;left:${progress.percent}%;transform:translateX(-50%) scaleX(-1);font-size:16px;line-height:1;pointer-events:none;transition:left 0.3s ease;">
             🏇
@@ -1084,13 +1084,11 @@
 
     existing.innerHTML = `
       <div style="border-bottom:2px solid #3b82f6;padding-bottom:8px;margin-bottom:12px;">
-        <!-- ROW 1: Track Name, Race #, Date -->
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;color:#60a5fa;font-weight:bold;font-size:13px;">
           <span>📍 ${trackDisplay} — RACE #${raceDisplay}${condTag}</span>
           <span style="color:#9ca3af;font-size:11px;">📅 ${currentDate}</span>
         </div>
 
-        <!-- ROW 2: Move Button, Reset Button, Zoom Slider -->
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
           <button id="ts-drag-handle" title="Click and drag to move panel" style="flex:1;background:#374151;color:#fbbf24;border:1px solid #4b5563;border-radius:4px;padding:4px 8px;cursor:move;font-weight:bold;font-size:11px;">✋ MOVE</button>
           <button id="ts-refresh-btn" title="Clear Cache & Reset Race" style="flex:1;background:#2563eb;color:#ffffff;border:1px solid #3b82f6;border-radius:4px;padding:4px 8px;cursor:pointer;font-weight:bold;font-size:11px;">🔄 RESET</button>
@@ -1101,7 +1099,6 @@
           </div>
         </div>
 
-        <!-- ROW 3: Active / Scratched Starters Count -->
         <div style="color:#9ca3af;font-size:11px;text-align:center;background:#1f2937;padding:4px;border-radius:4px;border:1px solid #374151;">
           <span style="color:#34d399;font-weight:bold;">${activeStartersCount}</span> Active Starters &nbsp;|&nbsp; <span style="color:#f87171;font-weight:bold;">${scratchedHorsesCount}</span> Scratched
         </div>
@@ -1225,5 +1222,5 @@
   startCollectionTicker();
   applyLeftAlignmentCSS();
   updateOverlay();
-  console.log("Live Handicapping Model V24 Running with 30s Comments Timeout Fallback!");
+  console.log("Live Handicapping Model V25 Running with 'Special' Track Weights (Churchill Downs & Horseshoe Indy)!");
 })();
