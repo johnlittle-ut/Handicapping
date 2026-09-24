@@ -701,7 +701,7 @@
       'Thoroughbred': { W_Speed: 0.18, W_Power: 0.10, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.06, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Market: 0.03 },
       'Harness': { W_Speed: 0.16, W_Power: 0.07, W_Class: 0.13, W_Distance: 0.04, W_Driver: 0.18, W_Trainer: 0.06, W_Early: 0.18, W_Finish: 0.08, W_Recency: 0.04, W_Market: 0.03 },
       'Quarter Horse': { W_Speed: 0.26, W_Power: 0.10, W_Class: 0.09, W_Distance: 0.02, W_Driver: 0.07, W_Trainer: 0.07, W_Early: 0.34, W_Finish: 0.00, W_Recency: 0.02, W_Market: 0.03 },
-      'Special': { W_Speed: 0.18, W_Power: 0.10, W_Class: 0.15, W_Distance: 0.08, W_Driver: 0.07, W_Trainer: 0.08, W_Early: 0.14, W_Finish: 0.11, W_Recency: 0.03, W_Market: 0.06 }
+      'Special': { W_Speed: 0.17, W_Power: 0.10, W_Class: 0.15, W_Distance: 0.08, W_Driver: 0.06, W_Trainer: 0.08, W_Early: 0.14, W_Finish: 0.11, W_Recency: 0.03, W_Market: 0.08 }
     };
 
     let isSpecialTrack = cleanTrack.toLowerCase().includes('churchill') || 
