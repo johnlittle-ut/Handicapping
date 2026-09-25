@@ -196,10 +196,11 @@
       #ts-model-overlay .ts-table .ts-horse-cell { white-space: normal; min-width: 130px; }
       #ts-model-overlay .ts-table tr.ts-scratched td { opacity: 0.55; }
       #ts-model-overlay .ts-table tr.ts-scratched .ts-horse-name { text-decoration: line-through; color: var(--ts-red); }
-      /* The 9-column leaderboard table needs more room than the container's own width to avoid
-         cramping/overlapping long horse names — let it exceed 100% and scroll horizontally via
-         .ts-table-wrap rather than force-squeezing every column. */
-      #ts-model-overlay .ts-table-leaderboard { width: auto; min-width: 100%; }
+      /* Tables with many/wide columns (the 9-column leaderboard, the 6-column wager table with
+         headers like "Hit Rate (%)") need more room than the container's own width to avoid
+         cramping/smushed text — let them exceed 100% and scroll horizontally via .ts-table-wrap
+         rather than force-squeezing every column. */
+      #ts-model-overlay .ts-table-scroll { width: auto; min-width: 100%; }
 
       /* Readable at small sizes on mobile */
       @media (max-width: 480px) {
@@ -826,9 +827,9 @@
       let showAmt = showNorm.values[i];
       if (showAmt > 0) anyShow = true;
       poolsMap[prog] = {
-        win: (isNaN(winAmt) || winAmt < 0) ? null : winAmt / winBase,
-        place: (isNaN(placeAmt) || placeAmt < 0) ? null : placeAmt / placeBase,
-        show: (isNaN(showAmt) || showAmt <= 0) ? null : showAmt / showBase
+        win: (isNaN(winAmt) || winAmt < 0) ? null : winAmt,
+        place: (isNaN(placeAmt) || placeAmt < 0) ? null : placeAmt,
+        show: (isNaN(showAmt) || showAmt <= 0) ? null : showAmt
       };
     });
 
@@ -1486,15 +1487,15 @@
       return Math.min(1, base + thirdSum);
     }
 
-    // Real live probable payout when we have it; otherwise a generalized odds-based estimate (~18% takeout)
+    // Real live probable payout ONLY — no odds-based fallback. If the real grid doesn't have this
+    // combo loaded yet, returns null so the candidate simply isn't generated until real data is
+    // available, matching how PLACE and SHOW already behave. The old fallback (multiplying both
+    // horses' odds together) was a reasonable rough approximation for one combo, but broke down
+    // badly once summed across all 6 combos of a 3-horse box simultaneously — waiting for real data
+    // is more honest than bounding a formula that shouldn't be trusted at all.
     function exactaPayoutEstimate(progA, progB) {
       let real = getExactaPayout(progA, progB);
-      if (real !== null) return { value: real, isReal: true };
-      let hA = cachedHorsesMap[progA], hB = cachedHorsesMap[progB];
-      let oA = hA ? (parseOddsToDecimal(hA.LIVE_ODDS) || parseOddsToDecimal(hA.ML_ODDS)) : NaN;
-      let oB = hB ? (parseOddsToDecimal(hB.LIVE_ODDS) || parseOddsToDecimal(hB.ML_ODDS)) : NaN;
-      if (isNaN(oA) || isNaN(oB) || oA <= 0 || oB <= 0) return { value: 0, isReal: false };
-      return { value: (oA + 1) * (oB + 1) * (1 - TAKEOUT_RATE), isReal: false };
+      return real !== null ? { value: real, isReal: true } : null;
     }
 
     // Dynamic $2-$6 stake sizing off an edge fraction (0-1), rounded to the nearest stepUnit
@@ -1514,27 +1515,26 @@
       );
       let c1 = ranked[0], c2 = ranked[1], c3 = ranked[2];
 
-      // --- WIN on top model pick ---
+      // --- WIN on top model pick (only added when real win-pool data is available — no odds-based
+      // fallback anymore; if nothing has real pool data yet, no wager candidates are shown at all
+      // rather than recommending off a less-reliable estimate) ---
       // Conviction (and therefore stake size) comes ONLY from how much of a score outlier the top
-      // pick is (its z-score) — never from odds or pool data. Payout prefers the REAL live pool
-      // payout (pari-mutuel formula off actual $ wagered); falls back to parsed odds text only if
-      // the Pools tab hasn't loaded yet for this race (e.g. race too far out to have wagering data).
+      // pick is (its z-score) — never from odds or pool data.
       if (c1) {
         let realWinPayoutRate = getWinPoolPayout(c1.PROGRAM);
-        let hasOdds = !isNaN(c1.ODDS_NUMERIC) && c1.ODDS_NUMERIC > 0;
-        if (realWinPayoutRate !== null || hasOdds) {
+        if (realWinPayoutRate !== null) {
           let pWin = winProbs[c1.PROGRAM].modelProb;
-          let payoutRate = realWinPayoutRate !== null ? realWinPayoutRate : (c1.ODDS_NUMERIC + 1);
           let conviction = computeConviction(winProbs[c1.PROGRAM].zScore);
           let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
-          let payoutIfWin = stake * payoutRate;
+          let payoutIfWin = stake * realWinPayoutRate;
           let ev = pWin * payoutIfWin - stake;
           candidates.push({
             type: 'WIN', typeLabel: 'Win', horses: `#${c1.PROGRAM}`,
             label: `$${stake} WIN on #${c1.PROGRAM}`,
             cost: stake, hitProb: pWin, ev, evPerDollar: ev / stake,
             payoutLow: payoutIfWin, payoutHigh: payoutIfWin,
-            detail: `Model Win Prob ${(pWin * 100).toFixed(0)}% (${realWinPayoutRate !== null ? 'Live Pool Payout' : 'Odds-based Est. — Pools not loaded'})`
+            isRealData: true,
+            detail: `Model Win Prob ${(pWin * 100).toFixed(0)}% (Live Pool Payout)`
           });
         }
       }
@@ -1554,6 +1554,7 @@
               label: `$${stake} PLACE on #${c1.PROGRAM}`,
               cost: stake, hitProb: pPlace, ev, evPerDollar: ev / stake,
               payoutLow: payoutIfPlace, payoutHigh: payoutIfPlace,
+              isRealData: true,
               detail: `Model Place Prob ${(pPlace * 100).toFixed(0)}% (Live Pool Payout, assumes #${c2.PROGRAM} is the other placer)`
             });
           }
@@ -1575,6 +1576,7 @@
               label: `$${stake} SHOW on #${c1.PROGRAM}`,
               cost: stake, hitProb: pShow, ev, evPerDollar: ev / stake,
               payoutLow: payoutIfShow, payoutHigh: payoutIfShow,
+              isRealData: true,
               detail: `Model Show Prob ${(pShow * 100).toFixed(0)}% (Live Pool Payout, assumes #${c2.PROGRAM}/#${c3.PROGRAM} are the other placers)`
             });
           }
@@ -1599,7 +1601,7 @@
       if (c1 && c2 && !c2c3NearTie) {
         let pOrder = exactaOrderProb(c1.PROGRAM, c2.PROGRAM);
         let payout = exactaPayoutEstimate(c1.PROGRAM, c2.PROGRAM);
-        if (payout.value > 0 && pOrder > 0) {
+        if (payout && payout.value > 0 && pOrder > 0) {
           let fairPayout = 1 / pOrder;
           let edge = Math.max(0, (payout.value - fairPayout) / fairPayout);
           let baseStake = Math.max(baseU, scaleStake(Math.min(edge, 1), 2, 6, baseU));
@@ -1611,7 +1613,8 @@
             label: `$${cost.toFixed(0)} Straight Exacta: #${c1.PROGRAM} / #${c2.PROGRAM}`,
             cost, hitProb: pOrder, ev, evPerDollar: ev / cost,
             payoutLow: payoutIfHit * 0.85, payoutHigh: payoutIfHit * 1.15,
-            detail: `${payout.isReal ? 'Live Probable' : 'Est.'} $${payout.value.toFixed(2)}/$1 base`
+            isRealData: true,
+            detail: `Live Probable $${payout.value.toFixed(2)}/$1 base`
           });
         }
       }
@@ -1623,17 +1626,17 @@
         let payAB = exactaPayoutEstimate(c1.PROGRAM, c2.PROGRAM);
         let payBA = exactaPayoutEstimate(c2.PROGRAM, c1.PROGRAM);
         let pBox = pAB + pBA;
-        if (pBox > 0 && (payAB.value > 0 || payBA.value > 0)) {
+        if (pBox > 0 && payAB && payBA && payAB.value > 0 && payBA.value > 0) {
           let cost = baseU * 2;
           let expectedPayout = (pAB * payAB.value + pBA * payBA.value) * baseU;
           let ev = expectedPayout - cost;
-          let bothReal = payAB.isReal && payBA.isReal;
           candidates.push({
             type: 'EXACTA_BOX2', typeLabel: 'Exacta Box (2)', horses: `#${c1.PROGRAM}, #${c2.PROGRAM}`,
             label: `$${cost.toFixed(0)} Exacta Box: #${c1.PROGRAM}, #${c2.PROGRAM}`,
             cost, hitProb: pBox, ev, evPerDollar: ev / cost,
             payoutLow: Math.min(payAB.value, payBA.value) * baseU * 0.85, payoutHigh: Math.max(payAB.value, payBA.value) * baseU * 1.15,
-            detail: `${bothReal ? 'Live Probables' : 'Partial/Est. Payouts'}, ${(pBox * 100).toFixed(0)}% modeled hit rate`
+            isRealData: true,
+            detail: `Live Probables, ${(pBox * 100).toFixed(0)}% modeled hit rate`
           });
         }
       }
@@ -1652,18 +1655,23 @@
         combos.forEach(([a, b]) => {
           let p = exactaOrderProb(a, b);
           let pay = exactaPayoutEstimate(a, b);
-          if (!pay.isReal) allReal = false;
+          if (!pay || !pay.isReal) allReal = false;
           pBox += p;
-          expectedPayout += p * pay.value * baseU;
+          expectedPayout += p * (pay ? pay.value : 0) * baseU;
         });
-        let ev = expectedPayout - cost;
-        candidates.push({
-          type: 'EXACTA_BOX3', typeLabel: 'Exacta Box (3)', horses: `#${c1.PROGRAM}, #${c2.PROGRAM}, #${c3.PROGRAM}`,
-          label: `$${cost.toFixed(0)} 3-Horse Exacta Box: #${c1.PROGRAM}, #${c2.PROGRAM}, #${c3.PROGRAM}`,
-          cost, hitProb: pBox, ev, evPerDollar: ev / cost,
-          payoutLow: expectedPayout * 0.7, payoutHigh: expectedPayout * 1.3,
-          detail: `${allReal ? 'Live Probables' : 'Partial/Est. Payouts'}, ${(pBox * 100).toFixed(0)}% modeled hit rate (6 combos)`
-        });
+        // Only recommend this box once every combo it needs is backed by real data — a partial
+        // estimate mixing real and missing combos would still misrepresent the true payout.
+        if (allReal) {
+          let ev = expectedPayout - cost;
+          candidates.push({
+            type: 'EXACTA_BOX3', typeLabel: 'Exacta Box (3)', horses: `#${c1.PROGRAM}, #${c2.PROGRAM}, #${c3.PROGRAM}`,
+            label: `$${cost.toFixed(0)} 3-Horse Exacta Box: #${c1.PROGRAM}, #${c2.PROGRAM}, #${c3.PROGRAM}`,
+            cost, hitProb: pBox, ev, evPerDollar: ev / cost,
+            payoutLow: expectedPayout * 0.7, payoutHigh: expectedPayout * 1.3,
+            isRealData: true,
+            detail: `Live Probables, ${(pBox * 100).toFixed(0)}% modeled hit rate (6 combos)`
+          });
+        }
       }
     }
 
@@ -1695,9 +1703,9 @@
         (byHitRate ? ` | Safety Pick: ${byHitRate.type.replace('_', ' ')} (${(byHitRate.hitProb * 100).toFixed(0)}% modeled hit rate)` : '');
 
       optionRows = [
-        { label: 'A', isPass: false, stake: best.cost, typeLabel: best.typeLabel, horses: best.horses, payoutLow: best.payoutLow, payoutHigh: best.payoutHigh, hitProb: best.hitProb },
+        { label: 'A', isPass: false, stake: best.cost, typeLabel: best.typeLabel, horses: best.horses, payoutLow: best.payoutLow, payoutHigh: best.payoutHigh, hitProb: best.hitProb, isRealData: best.isRealData },
         byHitRate
-          ? { label: 'B', isPass: false, stake: byHitRate.cost, typeLabel: byHitRate.typeLabel, horses: byHitRate.horses, payoutLow: byHitRate.payoutLow, payoutHigh: byHitRate.payoutHigh, hitProb: byHitRate.hitProb }
+          ? { label: 'B', isPass: false, stake: byHitRate.cost, typeLabel: byHitRate.typeLabel, horses: byHitRate.horses, payoutLow: byHitRate.payoutLow, payoutHigh: byHitRate.payoutHigh, hitProb: byHitRate.hitProb, isRealData: byHitRate.isRealData }
           : { label: 'B', isPass: true, passReason: 'No Bet - Low Payout' }
       ];
     }
@@ -1775,7 +1783,7 @@
           <div class="ts-muted" style="font-size:10px;">Thoroughbred vs Special</div>
         </div>
         <div class="ts-table-wrap">
-          <table class="ts-table">
+          <table class="ts-table ts-table-scroll">
             <thead><tr><th>Weight Set</th><th>1st</th><th>2nd</th><th>3rd</th></tr></thead>
             <tbody>
               <tr><td>Thoroughbred</td><td class="ts-num">${def.p1} (${def.s1})</td><td class="ts-num">${def.p2} (${def.s2})</td><td class="ts-num">${def.p3} (${def.s3})</td></tr>
@@ -2020,7 +2028,7 @@
       ? `<div class="ts-muted">Awaiting Field Calculation...</div>`
       : `
         <div class="ts-table-wrap">
-          <table class="ts-table ts-table-leaderboard">
+          <table class="ts-table ts-table-scroll">
             <thead><tr>
               <th>Rk</th><th>#</th><th>Horse</th><th>Final</th><th>Base</th><th>Post</th><th>Style</th><th>Bonus</th><th>Wet Bonus</th>
             </tr></thead>
@@ -2046,7 +2054,7 @@
       ? `<div class="ts-muted">N/A</div>`
       : `
         <div class="ts-table-wrap">
-          <table class="ts-table">
+          <table class="ts-table ts-table-scroll">
             <thead><tr><th>Rk</th><th>#</th><th>Horse</th><th>Score</th><th>Gap</th></tr></thead>
             <tbody>${gapRowsHtml}</tbody>
           </table>
@@ -2107,9 +2115,9 @@
         <div class="ts-section-label">Wager Recommendations</div>
         <div class="ts-italic ts-muted" style="margin-bottom:6px;">${modelRes.wagerRecs.scenario}</div>
         <div class="ts-table-wrap">
-          <table class="ts-table">
+          <table class="ts-table ts-table-scroll">
             <thead><tr>
-              <th>Option</th><th>Bet Size ($)</th><th>Type</th><th>#</th><th>Payout ($)</th><th>Hit Rate (%)</th>
+              <th>Option</th><th>$</th><th>Type</th><th>#</th><th>Payout</th><th>Hit %</th>
             </tr></thead>
             <tbody>
               ${modelRes.wagerRecs.optionRows.map(o => o.isPass ? `
@@ -2121,9 +2129,9 @@
                 <tr>
                   <td>${o.label}</td>
                   <td class="ts-num">$${o.stake}</td>
-                  <td>${o.typeLabel}</td>
-                  <td>${o.horses}</td>
-                  <td class="ts-num">${o.payoutLow.toFixed(2) === o.payoutHigh.toFixed(2) ? '$' + o.payoutLow.toFixed(2) : '$' + o.payoutLow.toFixed(2) + '–$' + o.payoutHigh.toFixed(2)}</td>
+                  <td style="white-space:nowrap;">${o.typeLabel}</td>
+                  <td style="white-space:nowrap;">${o.horses}</td>
+                  <td class="ts-num" style="white-space:nowrap;">${o.payoutLow.toFixed(2) === o.payoutHigh.toFixed(2) ? '$' + o.payoutLow.toFixed(2) : '$' + o.payoutLow.toFixed(2) + '–$' + o.payoutHigh.toFixed(2)}</td>
                   <td class="ts-num">${(o.hitProb * 100).toFixed(0)}%</td>
                 </tr>`
               ).join('')}
