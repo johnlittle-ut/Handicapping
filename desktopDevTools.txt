@@ -12,6 +12,15 @@
   // instability bug this fixes is specifically caused by these fields still trickling in after the
   // tab-click-based "loaded" signal fires).
   const SCORING_NUM_FIELDS = ['PRM_PWR', 'AVG_SPD', 'BACK_SPD', 'SPD_LR', 'AVG_CLS', 'LAST_CLS', 'AVG_DIST_SPD', 'BEST_SPD', 'W_JKY', 'W_TRN', 'E1', 'E2', 'LP', 'DAYS_OFF'];
+
+  // ===== TEMPORARY BACKTESTING FEATURE =====
+  // Runs the model twice per race (Thoroughbred/default weights AND Special weights, regardless
+  // of which set the track would normally auto-select) and shows both leaderboards side by side,
+  // so results can be compared against actual finishes at ANY track — not just the ones already on
+  // SPECIAL_WEIGHT_TRACKS — to decide whether Special weights should be extended there. Off by
+  // default; toggled on/off via the switch in the status row. Delete this block, its toggle UI/
+  // event listener, and its one usage below to remove the feature entirely once backtesting is done.
+  let dualWeightTestMode = false;
   let loadedTabs = {
     'Summary': false,
     'Advanced': false,
@@ -146,6 +155,24 @@
         border-radius: 6px;
         border: 1px solid var(--ts-border-soft);
       }
+      #ts-model-overlay .ts-toggle-row {
+        display: flex; align-items: center; gap: 6px;
+        font-size: 10px; color: var(--ts-fg-muted); font-weight: 700; white-space: nowrap;
+      }
+      #ts-model-overlay .ts-toggle-switch {
+        position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0;
+      }
+      #ts-model-overlay .ts-toggle-switch input { opacity: 0; width: 0; height: 0; }
+      #ts-model-overlay .ts-toggle-slider {
+        position: absolute; cursor: pointer; inset: 0;
+        background: var(--ts-border-soft); border-radius: 18px; transition: background 0.15s ease;
+      }
+      #ts-model-overlay .ts-toggle-slider::before {
+        content: ""; position: absolute; height: 14px; width: 14px; left: 2px; bottom: 2px;
+        background: var(--ts-fg); border-radius: 50%; transition: transform 0.15s ease;
+      }
+      #ts-model-overlay .ts-toggle-switch input:checked + .ts-toggle-slider { background: var(--ts-yellow); }
+      #ts-model-overlay .ts-toggle-switch input:checked + .ts-toggle-slider::before { transform: translateX(14px); background: #282a36; }
       #ts-model-overlay .ts-badge {
         font-size: 9.5px;
         font-weight: 700;
@@ -311,6 +338,7 @@
     cachedPlacePoolTotal = 0;
     cachedShowPoolTotal = 0;
     cachedShowPoolAvailable = false;
+    cachedPoolsWasPercentMode = false;
     REQUIRED_TABS.forEach(tab => loadedTabs[tab] = false);
     previousRankScoreMap = {};
     lastFieldFingerprint = null;
@@ -366,6 +394,13 @@
     document.addEventListener('change', commitZoom);
     document.addEventListener('mouseup', commitZoom);
     document.addEventListener('touchend', commitZoom);
+
+    document.addEventListener('change', function(e) {
+      if (e.target && e.target.id === 'ts-weight-compare-toggle') {
+        dualWeightTestMode = e.target.checked;
+        updateOverlay();
+      }
+    });
 
     document.addEventListener('click', function(e) {
       if (!e.target) return;
@@ -457,6 +492,7 @@
   let cachedPlacePoolTotal = 0;
   let cachedShowPoolTotal = 0;
   let cachedShowPoolAvailable = false;
+  let cachedPoolsWasPercentMode = false; // true when the last Pools payload was auto-detected and converted from % display mode
 
   const ROUTE_IGNORE_LIST = [
     'bet', 'bets', 'betting', 'race', 'races', 'handicapping', 
@@ -469,6 +505,12 @@
   // and as the fallback exacta payout estimator's discount. Validated against a real UK Haydock
   // WIN pool (~18% reproduced the track's displayed odds almost exactly).
   const TAKEOUT_RATE = 0.18;
+
+  // A bet must promise at least this much back per dollar risked (net of the stake itself) to be
+  // worth recommending at all — regardless of EV. A heavy favorite to place/show can be technically
+  // EV-positive while still only returning a few cents of profit per dollar, which isn't worth a
+  // wager slot even at low risk. 1.5 = payout must be >= 1.5x the stake, i.e. at least 50% profit.
+  const MIN_PAYOUT_RATIO = 1.5;
 
   // Returns wetness tier: 0 = dry/fast/firm, 1 = off/yielding (moderately wet), 2 = sloppy/muddy/heavy (fully wet)
   function getWetnessTier(condVal) {
@@ -738,6 +780,22 @@
   // Parses the WPSPools payload. Win/Place/Show are $ amounts WAGERED on each horse (pool share),
   // NOT payouts — confirmed by summing to the pool totals. Real payouts are derived separately
   // via the pari-mutuel formula in getWinPoolPayout/getPlacePoolPayout below.
+  // Detects whether a pool's per-horse values are dollar amounts or percentages of the pool,
+  // purely from the data itself — dollar amounts across the field should sum close to the real
+  // pool total (usually thousands), percentages should sum close to 100. Whichever hypothesis
+  // fits better wins. Returns the values converted to dollar-equivalents either way, so downstream
+  // math (which assumes dollars) works correctly regardless of which display mode the page was in
+  // when the data was captured.
+  function normalizePoolValues(rawValues, poolTotal) {
+    let validSum = rawValues.filter(v => !isNaN(v) && v > 0).reduce((a, b) => a + b, 0);
+    if (validSum <= 0 || !poolTotal) return { values: rawValues, wasPercent: false };
+    let distFromPercent = Math.abs(validSum - 100);
+    let distFromDollar = Math.abs(validSum - poolTotal);
+    let looksLikePercent = distFromPercent < distFromDollar;
+    if (!looksLikePercent) return { values: rawValues, wasPercent: false };
+    return { values: rawValues.map(v => (isNaN(v) || v <= 0) ? v : (v / 100) * poolTotal), wasPercent: true };
+  }
+
   function parsePoolsPayload(payload) {
     let poolTotalsArr = payload.PoolTotals || [];
     let winTotal = 0, placeTotal = 0, showTotal = 0, winBase = 1, placeBase = 1, showBase = 1;
@@ -749,13 +807,23 @@
     });
 
     let entries = (payload.WPSPools && payload.WPSPools.Entries) || [];
+
+    // Detect mode per pool (Win/Place/Show could in principle each be toggled independently,
+    // though in practice it's likely one page-wide toggle) using the raw values across all horses.
+    let rawWin = entries.map(e => getVal(e, 'Win', NaN));
+    let rawPlace = entries.map(e => getVal(e, 'Place', NaN));
+    let rawShow = entries.map(e => getVal(e, 'Show', NaN));
+    let winNorm = normalizePoolValues(rawWin, winTotal);
+    let placeNorm = normalizePoolValues(rawPlace, placeTotal);
+    let showNorm = normalizePoolValues(rawShow, showTotal);
+
     let poolsMap = {};
     let anyShow = false;
-    entries.forEach(e => {
+    entries.forEach((e, i) => {
       let prog = getStr(e, 'ProgramNumber');
-      let winAmt = getVal(e, 'Win', NaN);
-      let placeAmt = getVal(e, 'Place', NaN);
-      let showAmt = getVal(e, 'Show', NaN);
+      let winAmt = winNorm.values[i];
+      let placeAmt = placeNorm.values[i];
+      let showAmt = showNorm.values[i];
       if (showAmt > 0) anyShow = true;
       poolsMap[prog] = {
         win: (isNaN(winAmt) || winAmt < 0) ? null : winAmt / winBase,
@@ -764,7 +832,10 @@
       };
     });
 
-    return { poolsMap, winTotal, placeTotal, showTotal, showAvailable: anyShow };
+    return {
+      poolsMap, winTotal, placeTotal, showTotal, showAvailable: anyShow,
+      detectedPercentMode: winNorm.wasPercent || placeNorm.wasPercent || showNorm.wasPercent
+    };
   }
 
   // Real total return per $1 WIN bet (includes stake), via the standard pari-mutuel formula:
@@ -776,23 +847,52 @@
     return netPool / entry.win;
   }
 
-  // Real total return per $1 PLACE bet, same formula applied to the place pool. This is an
-  // approximation — true place-pool math depends jointly on whichever OTHER horse also places,
-  // which can't be known in advance — but it's a standard simplification and far better than guessing.
-  function getPlacePoolPayout(program) {
-    let entry = cachedPoolsMap[String(program)];
-    if (!entry || entry.place === null || entry.place <= 0 || !cachedPlacePoolTotal) return null;
+  // Real total return per $1 PLACE bet — the CORRECT pari-mutuel mechanism, not the WIN formula.
+  // Place/show pools are shared among however many horses actually finish in those positions: each
+  // placer's own stake is returned as principal first, then the remaining PROFIT is split EQUALLY
+  // among the placing horses (not proportionally to their stakes), and each horse's equal profit
+  // share is divided by THAT horse's own stake — which is exactly why a heavily-bet favorite pays
+  // less than a lightly-bet longshot even when both place. Verified against a real race: computed
+  // this way, estimates landed within a few cents of the actual posted payouts for all 3 SHOW
+  // horses; the old single-horse-takes-the-whole-pool formula overestimated by roughly 3x.
+  //
+  // Since we can't know in advance who ELSE will place, `assumedCoPlacerPrograms` should be the
+  // model's own top-ranked contenders (excluding `program` itself) as the best available guess —
+  // this is inherently an estimate, clearly labeled as such in the candidate's detail text.
+  function getPlacePoolPayout(program, assumedCoPlacerPrograms) {
+    if (!cachedPlacePoolTotal) return null;
+    let allPlacers = [String(program)].concat((assumedCoPlacerPrograms || []).map(String));
+    let stakes = allPlacers.map(p => {
+      let entry = cachedPoolsMap[p];
+      return (entry && entry.place !== null && entry.place > 0) ? entry.place : null;
+    });
+    if (stakes.some(s => s === null)) return null;
+    let targetStake = stakes[0];
+    let combinedStakes = stakes.reduce((a, b) => a + b, 0);
     let netPool = cachedPlacePoolTotal * (1 - TAKEOUT_RATE);
-    return netPool / entry.place;
+    let profitPool = netPool - combinedStakes;
+    if (profitPool <= 0) return null;
+    let profitPerPlacer = profitPool / allPlacers.length;
+    return 1 + (profitPerPlacer / targetStake);
   }
 
-  // Real total return per $1 SHOW bet, same pari-mutuel simplification as PLACE — an approximation,
-  // since true show-pool payout depends jointly on whichever other two horses also finish top 3.
-  function getShowPoolPayout(program) {
-    let entry = cachedPoolsMap[String(program)];
-    if (!entry || entry.show === null || entry.show <= 0 || !cachedShowPoolTotal) return null;
+  // Real total return per $1 SHOW bet — same corrected mechanism as PLACE above, split among 3
+  // assumed co-placers instead of 2.
+  function getShowPoolPayout(program, assumedCoPlacerPrograms) {
+    if (!cachedShowPoolTotal) return null;
+    let allPlacers = [String(program)].concat((assumedCoPlacerPrograms || []).map(String));
+    let stakes = allPlacers.map(p => {
+      let entry = cachedPoolsMap[p];
+      return (entry && entry.show !== null && entry.show > 0) ? entry.show : null;
+    });
+    if (stakes.some(s => s === null)) return null;
+    let targetStake = stakes[0];
+    let combinedStakes = stakes.reduce((a, b) => a + b, 0);
     let netPool = cachedShowPoolTotal * (1 - TAKEOUT_RATE);
-    return netPool / entry.show;
+    let profitPool = netPool - combinedStakes;
+    if (profitPool <= 0) return null;
+    let profitPerPlacer = profitPool / allPlacers.length;
+    return 1 + (profitPerPlacer / targetStake);
   }
 
   function parseAndMergeRunnerRow(r) {
@@ -928,13 +1028,14 @@
   // exacta base unit, and the takeout constant used across the payout formulas. Kept as a separate
   // small CSV block since it's a different schema than the per-horse rows or the meet/week IV stats.
   function getRaceWidePoolsCsv() {
-    let header = 'WIN_POOL_TOTAL,PLACE_POOL_TOTAL,SHOW_POOL_TOTAL,SHOW_POOL_AVAILABLE,EXACTA_POOL_TOTAL,EXACTA_BASE_UNIT,TRACK_CONDITION,WETNESS_TIER,POST_TIME,TAKEOUT_RATE';
+    let header = 'WIN_POOL_TOTAL,PLACE_POOL_TOTAL,SHOW_POOL_TOTAL,SHOW_POOL_AVAILABLE,POOLS_PERCENT_MODE_DETECTED,EXACTA_POOL_TOTAL,EXACTA_BASE_UNIT,TRACK_CONDITION,WETNESS_TIER,POST_TIME,TAKEOUT_RATE';
     let wetnessTier = getWetnessTier(cachedTrackCondition);
     let row = [
       cachedWinPoolTotal || 0,
       cachedPlacePoolTotal || 0,
       cachedShowPoolTotal || 0,
       cachedShowPoolAvailable,
+      cachedPoolsWasPercentMode,
       cachedExactaPoolTotal || 0,
       cachedExactaBaseUnit || 1,
       cachedTrackCondition ? `"${cachedTrackCondition}"` : '""',
@@ -997,14 +1098,14 @@
     return [meetRow, weekRow];
   }
 
-  function calculateModelOutput() {
+  function calculateModelOutput(forcedWeightKey) {
     let runnerKeys = Object.keys(cachedHorsesMap);
     if (runnerKeys.length < 3) {
       return {
         ruleAppliedMsg: "Awaiting field data...",
         leaderboard: [],
         gaps: [],
-        wagerRecs: { optionA: "N/A", optionB: "N/A", optionC: null, scenario: "Insufficient Data" }
+        wagerRecs: { scenario: "Insufficient Data", optionRows: [{ label: 'A', isPass: true, passReason: 'Awaiting field data' }, { label: 'B', isPass: true, passReason: 'Awaiting field data' }] }
       };
     }
 
@@ -1012,7 +1113,7 @@
     let cleanBreed = cachedBreed || "Thoroughbred";
 
     const weightsDict = {
-      'Thoroughbred': { W_Speed: 0.18, W_Power: 0.10, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.06, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Market: 0.03 },
+      'Thoroughbred': { W_Speed: 0.17, W_Power: 0.09, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.08, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Market: 0.03 },
       'Harness': { W_Speed: 0.16, W_Power: 0.07, W_Class: 0.13, W_Distance: 0.04, W_Driver: 0.18, W_Trainer: 0.06, W_Early: 0.18, W_Finish: 0.08, W_Recency: 0.04, W_Market: 0.03 },
       'Quarter Horse': { W_Speed: 0.26, W_Power: 0.10, W_Class: 0.09, W_Distance: 0.02, W_Driver: 0.07, W_Trainer: 0.07, W_Early: 0.34, W_Finish: 0.00, W_Recency: 0.02, W_Market: 0.03 },
       'Special': { W_Speed: 0.17, W_Power: 0.08, W_Class: 0.15, W_Distance: 0.08, W_Driver: 0.06, W_Trainer: 0.09, W_Early: 0.14, W_Finish: 0.11, W_Recency: 0.03, W_Market: 0.09 }
@@ -1029,7 +1130,7 @@
     let isSpecialTrack = cleanBreed === 'Thoroughbred' &&
       SPECIAL_WEIGHT_TRACKS.some(t => cleanTrack.toLowerCase().includes(t));
 
-    let activeWeightKey = isSpecialTrack ? 'Special' : (weightsDict[cleanBreed] ? cleanBreed : 'Thoroughbred');
+    let activeWeightKey = forcedWeightKey || (isSpecialTrack ? 'Special' : (weightsDict[cleanBreed] ? cleanBreed : 'Thoroughbred'));
     let activeWeights = Object.assign({}, weightsDict[activeWeightKey]);
 
     let weekRaces = 0, meetRaces = 100;
@@ -1303,6 +1404,17 @@
     let winProbs = {}; // program -> { modelProb, zScore }
     const MAX_Z_REF = 2.5; // cap on standardized score, avoids runaway probabilities/conviction from outlier scores
 
+    // A "typical" leader in a modest field sits roughly 1-1.5 SD above the field average purely
+    // from order-statistics (the best of N horses is expected to look somewhat above-average even
+    // with no real edge) — a plain z/MAX_Z_REF mapping was treating that as meaningfully confident,
+    // which structurally skewed stakes toward $4 for perfectly ordinary favorites. BASELINE_Z shifts
+    // the zero-point: only a leader clearly ABOVE typical starts scaling stake past the $2 floor.
+    const BASELINE_Z = 1.3;
+    function computeConviction(zScore) {
+      let excess = Math.max(0, zScore - BASELINE_Z);
+      return Math.min(excess / (MAX_Z_REF - BASELINE_Z), 1);
+    }
+
     // Win probability is derived ONLY from the model's own FINAL_SCORE (which already has its own
     // market/odds component baked in via W_Market — see baseSkill). Live odds are NOT blended in here;
     // they're used later strictly to price the WIN bet's payout, per the design correction below.
@@ -1413,12 +1525,13 @@
         if (realWinPayoutRate !== null || hasOdds) {
           let pWin = winProbs[c1.PROGRAM].modelProb;
           let payoutRate = realWinPayoutRate !== null ? realWinPayoutRate : (c1.ODDS_NUMERIC + 1);
-          let conviction = Math.max(0, winProbs[c1.PROGRAM].zScore / MAX_Z_REF);
+          let conviction = computeConviction(winProbs[c1.PROGRAM].zScore);
           let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
           let payoutIfWin = stake * payoutRate;
           let ev = pWin * payoutIfWin - stake;
           candidates.push({
-            type: 'WIN', label: `$${stake} WIN on #${c1.PROGRAM}`,
+            type: 'WIN', typeLabel: 'Win', horses: `#${c1.PROGRAM}`,
+            label: `$${stake} WIN on #${c1.PROGRAM}`,
             cost: stake, hitProb: pWin, ev, evPerDollar: ev / stake,
             payoutLow: payoutIfWin, payoutHigh: payoutIfWin,
             detail: `Model Win Prob ${(pWin * 100).toFixed(0)}% (${realWinPayoutRate !== null ? 'Live Pool Payout' : 'Odds-based Est. — Pools not loaded'})`
@@ -1427,47 +1540,63 @@
       }
 
       // --- PLACE on top model pick (only added when real place-pool data is available) ---
-      if (c1) {
-        let realPlacePayoutRate = getPlacePoolPayout(c1.PROGRAM);
+      if (c1 && c2) {
+        let realPlacePayoutRate = getPlacePoolPayout(c1.PROGRAM, [c2.PROGRAM]);
         if (realPlacePayoutRate !== null) {
           let pPlace = placeProbabilityOf(c1.PROGRAM);
           if (pPlace > 0) {
-            let conviction = Math.max(0, winProbs[c1.PROGRAM].zScore / MAX_Z_REF);
+            let conviction = computeConviction(winProbs[c1.PROGRAM].zScore);
             let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
             let payoutIfPlace = stake * realPlacePayoutRate;
             let ev = pPlace * payoutIfPlace - stake;
             candidates.push({
-              type: 'PLACE', label: `$${stake} PLACE on #${c1.PROGRAM}`,
+              type: 'PLACE', typeLabel: 'Place', horses: `#${c1.PROGRAM}`,
+              label: `$${stake} PLACE on #${c1.PROGRAM}`,
               cost: stake, hitProb: pPlace, ev, evPerDollar: ev / stake,
               payoutLow: payoutIfPlace, payoutHigh: payoutIfPlace,
-              detail: `Model Place Prob ${(pPlace * 100).toFixed(0)}% (Live Pool Payout, approx.)`
+              detail: `Model Place Prob ${(pPlace * 100).toFixed(0)}% (Live Pool Payout, assumes #${c2.PROGRAM} is the other placer)`
             });
           }
         }
       }
 
       // --- SHOW on top model pick (only added when real show-pool data is available) ---
-      if (c1) {
-        let realShowPayoutRate = getShowPoolPayout(c1.PROGRAM);
+      if (c1 && c2 && c3) {
+        let realShowPayoutRate = getShowPoolPayout(c1.PROGRAM, [c2.PROGRAM, c3.PROGRAM]);
         if (realShowPayoutRate !== null) {
           let pShow = showProbabilityOf(c1.PROGRAM);
           if (pShow > 0) {
-            let conviction = Math.max(0, winProbs[c1.PROGRAM].zScore / MAX_Z_REF);
+            let conviction = computeConviction(winProbs[c1.PROGRAM].zScore);
             let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
             let payoutIfShow = stake * realShowPayoutRate;
             let ev = pShow * payoutIfShow - stake;
             candidates.push({
-              type: 'SHOW', label: `$${stake} SHOW on #${c1.PROGRAM}`,
+              type: 'SHOW', typeLabel: 'Show', horses: `#${c1.PROGRAM}`,
+              label: `$${stake} SHOW on #${c1.PROGRAM}`,
               cost: stake, hitProb: pShow, ev, evPerDollar: ev / stake,
               payoutLow: payoutIfShow, payoutHigh: payoutIfShow,
-              detail: `Model Show Prob ${(pShow * 100).toFixed(0)}% (Live Pool Payout, approx.)`
+              detail: `Model Show Prob ${(pShow * 100).toFixed(0)}% (Live Pool Payout, assumes #${c2.PROGRAM}/#${c3.PROGRAM} are the other placers)`
             });
           }
         }
       }
 
+      // A straight exacta or 2-horse box both deliberately exclude c3 in favor of c2 for the
+      // "second place" slot — defensible only when c2 is genuinely more likely than c3. When
+      // they're close, arbitrarily picking one over the other throws away real probability mass;
+      // the 3-horse box already covers both, so it's the honest candidate in that situation.
+      // Uses win-probability ratio, not a raw score-point gap, so it scales correctly whether the
+      // field is tightly bunched or widely spread (same reasoning as the rest of this engine).
+      const NEAR_TIE_PROB_RATIO = 0.85;
+      let c2c3NearTie = false;
+      if (c2 && c3) {
+        let p2 = winProbs[c2.PROGRAM] ? winProbs[c2.PROGRAM].modelProb : 0;
+        let p3 = winProbs[c3.PROGRAM] ? winProbs[c3.PROGRAM].modelProb : 0;
+        if (p2 > 0 && (p3 / p2) >= NEAR_TIE_PROB_RATIO) c2c3NearTie = true;
+      }
+
       // --- Straight exacta: top 2 model picks, in that order ---
-      if (c1 && c2) {
+      if (c1 && c2 && !c2c3NearTie) {
         let pOrder = exactaOrderProb(c1.PROGRAM, c2.PROGRAM);
         let payout = exactaPayoutEstimate(c1.PROGRAM, c2.PROGRAM);
         if (payout.value > 0 && pOrder > 0) {
@@ -1478,7 +1607,8 @@
           let payoutIfHit = payout.value * baseStake;
           let ev = pOrder * payoutIfHit - cost;
           candidates.push({
-            type: 'EXACTA_STRAIGHT', label: `$${cost.toFixed(0)} Straight Exacta: #${c1.PROGRAM} / #${c2.PROGRAM}`,
+            type: 'EXACTA_STRAIGHT', typeLabel: 'Exacta (Straight)', horses: `#${c1.PROGRAM}/#${c2.PROGRAM}`,
+            label: `$${cost.toFixed(0)} Straight Exacta: #${c1.PROGRAM} / #${c2.PROGRAM}`,
             cost, hitProb: pOrder, ev, evPerDollar: ev / cost,
             payoutLow: payoutIfHit * 0.85, payoutHigh: payoutIfHit * 1.15,
             detail: `${payout.isReal ? 'Live Probable' : 'Est.'} $${payout.value.toFixed(2)}/$1 base`
@@ -1487,7 +1617,7 @@
       }
 
       // --- 2-horse exacta box ---
-      if (c1 && c2) {
+      if (c1 && c2 && !c2c3NearTie) {
         let pAB = exactaOrderProb(c1.PROGRAM, c2.PROGRAM);
         let pBA = exactaOrderProb(c2.PROGRAM, c1.PROGRAM);
         let payAB = exactaPayoutEstimate(c1.PROGRAM, c2.PROGRAM);
@@ -1499,7 +1629,8 @@
           let ev = expectedPayout - cost;
           let bothReal = payAB.isReal && payBA.isReal;
           candidates.push({
-            type: 'EXACTA_BOX2', label: `$${cost.toFixed(0)} Exacta Box: #${c1.PROGRAM}, #${c2.PROGRAM}`,
+            type: 'EXACTA_BOX2', typeLabel: 'Exacta Box (2)', horses: `#${c1.PROGRAM}, #${c2.PROGRAM}`,
+            label: `$${cost.toFixed(0)} Exacta Box: #${c1.PROGRAM}, #${c2.PROGRAM}`,
             cost, hitProb: pBox, ev, evPerDollar: ev / cost,
             payoutLow: Math.min(payAB.value, payBA.value) * baseU * 0.85, payoutHigh: Math.max(payAB.value, payBA.value) * baseU * 1.15,
             detail: `${bothReal ? 'Live Probables' : 'Partial/Est. Payouts'}, ${(pBox * 100).toFixed(0)}% modeled hit rate`
@@ -1527,7 +1658,8 @@
         });
         let ev = expectedPayout - cost;
         candidates.push({
-          type: 'EXACTA_BOX3', label: `$${cost.toFixed(0)} 3-Horse Exacta Box: #${c1.PROGRAM}, #${c2.PROGRAM}, #${c3.PROGRAM}`,
+          type: 'EXACTA_BOX3', typeLabel: 'Exacta Box (3)', horses: `#${c1.PROGRAM}, #${c2.PROGRAM}, #${c3.PROGRAM}`,
+          label: `$${cost.toFixed(0)} 3-Horse Exacta Box: #${c1.PROGRAM}, #${c2.PROGRAM}, #${c3.PROGRAM}`,
           cost, hitProb: pBox, ev, evPerDollar: ev / cost,
           payoutLow: expectedPayout * 0.7, payoutHigh: expectedPayout * 1.3,
           detail: `${allReal ? 'Live Probables' : 'Partial/Est. Payouts'}, ${(pBox * 100).toFixed(0)}% modeled hit rate (6 combos)`
@@ -1536,31 +1668,45 @@
     }
 
     let positiveEv = candidates.filter(c => c.ev > 0 && c.cost > 0);
-    let scenario = "", optionA = "", optionB = "";
+    // Payout ratio uses the conservative (low) end of the estimated range, so a candidate only
+    // clears the bar if it's still worth it even under the more pessimistic payout estimate.
+    let worthwhile = positiveEv.filter(c => (c.payoutLow / c.cost) >= MIN_PAYOUT_RATIO);
+    let scenario = "";
+    let optionRows = [];
 
     if (positiveEv.length === 0) {
-      scenario = liveRunners.length < 2 ? "Insufficient Live Runners" : "No Positive-EV Wager Identified";
-      optionA = "$0 (PASS / NO BET — no candidate wager clears a positive expected value)";
-      optionB = "$0 (PASS / NO BET — field is efficiently priced or too unpredictable to gain an edge)";
+      scenario = liveRunners.length < 2 ? "Insufficient Live Runners" : "No Positive-EV Wager Identified — field too closely matched to find a real edge";
+      optionRows = [
+        { label: 'A', isPass: true, passReason: 'No Bet - Too Close' },
+        { label: 'B', isPass: true, passReason: 'No Bet - Too Close' }
+      ];
+    } else if (worthwhile.length === 0) {
+      scenario = `Positive EV Only on Thin-Margin Favorites — payout under ${MIN_PAYOUT_RATIO}x the stake`;
+      optionRows = [
+        { label: 'A', isPass: true, passReason: 'No Bet - Low Payout' },
+        { label: 'B', isPass: true, passReason: 'No Bet - Low Payout' }
+      ];
     } else {
-      let byEv = positiveEv.slice().sort((a, b) => b.evPerDollar - a.evPerDollar);
+      let byEv = worthwhile.slice().sort((a, b) => b.evPerDollar - a.evPerDollar);
       let best = byEv[0];
-      let byHitRate = positiveEv.slice().sort((a, b) => b.hitProb - a.hitProb).find(c => c.type !== best.type) || byEv[1];
+      let byHitRate = worthwhile.slice().sort((a, b) => b.hitProb - a.hitProb).find(c => c.type !== best.type) || byEv[1];
 
       scenario = `Value Pick: ${best.type.replace('_', ' ')} (EV/$ = +${(best.evPerDollar * 100).toFixed(0)}%)` +
         (byHitRate ? ` | Safety Pick: ${byHitRate.type.replace('_', ' ')} (${(byHitRate.hitProb * 100).toFixed(0)}% modeled hit rate)` : '');
 
-      optionA = `${best.label} — Est. Payout $${best.payoutLow.toFixed(2)}–$${best.payoutHigh.toFixed(2)} (${best.detail})`;
-      optionB = byHitRate
-        ? `${byHitRate.label} — Est. Payout $${byHitRate.payoutLow.toFixed(2)}–$${byHitRate.payoutHigh.toFixed(2)} (${byHitRate.detail})`
-        : "$0 (PASS — no distinct second option cleared a positive EV)";
+      optionRows = [
+        { label: 'A', isPass: false, stake: best.cost, typeLabel: best.typeLabel, horses: best.horses, payoutLow: best.payoutLow, payoutHigh: best.payoutHigh, hitProb: best.hitProb },
+        byHitRate
+          ? { label: 'B', isPass: false, stake: byHitRate.cost, typeLabel: byHitRate.typeLabel, horses: byHitRate.horses, payoutLow: byHitRate.payoutLow, payoutHigh: byHitRate.payoutHigh, hitProb: byHitRate.hitProb }
+          : { label: 'B', isPass: true, passReason: 'No Bet - Low Payout' }
+      ];
     }
 
     return {
       ruleAppliedMsg,
       leaderboard: runners,
       gaps: { gap12, gap23, gap34, gap45, gap13, gap14 },
-      wagerRecs: { scenario, optionA, optionB, optionC: null },
+      wagerRecs: { scenario, optionRows },
       wetnessTier,
       trackConditionRaw: cachedTrackCondition
     };
@@ -1597,6 +1743,50 @@
         <div class="ts-code-block" style="max-height:180px;">
           ${contentHtml}
         </div>
+      </div>
+    `;
+  }
+
+  // TEMPORARY — see dualWeightTestMode. Builds a compact side-by-side comparison of the top 3
+  // picks under Thoroughbred (default) vs Special weights, plus a pipe-delimited export line for
+  // each, so results can be logged and compared against actual finishes at any track.
+  function getWeightComparisonSectionHtml(modelResDefault, modelResSpecial) {
+    let rawPostTime = getActivePostTime();
+    let { dateStr, timeStr } = parseExportDateTime(rawPostTime);
+    let trackName = getActiveTrackName().replace(/"/g, '');
+    let raceNum = getActiveRaceNum();
+
+    function top3Row(modelRes, weightLabel) {
+      let top1 = modelRes.leaderboard[0], top2 = modelRes.leaderboard[1], top3 = modelRes.leaderboard[2];
+      let p1 = top1 ? `#${top1.PROGRAM}` : 'N/A', s1 = top1 ? top1.FINAL_SCORE.toFixed(2) : 'N/A';
+      let p2 = top2 ? `#${top2.PROGRAM}` : 'N/A', s2 = top2 ? top2.FINAL_SCORE.toFixed(2) : 'N/A';
+      let p3 = top3 ? `#${top3.PROGRAM}` : 'N/A', s3 = top3 ? top3.FINAL_SCORE.toFixed(2) : 'N/A';
+      let pipeString = `${dateStr}|${timeStr}|${trackName}|${raceNum}|${weightLabel}|${p1}|${s1}|${p2}|${s2}|${p3}|${s3}`;
+      return { p1, s1, p2, s2, p3, s3, pipeString };
+    }
+
+    let def = top3Row(modelResDefault, 'Thoroughbred');
+    let spec = top3Row(modelResSpecial, 'Special');
+
+    return `
+      <div class="ts-panel" style="border-color:var(--ts-yellow);">
+        <div class="ts-row-flex" style="margin-bottom:6px;">
+          <div class="ts-panel-title" style="color:var(--ts-yellow);margin-bottom:0;">⚖️ Weight Comparison (Temporary Backtesting)</div>
+          <div class="ts-muted" style="font-size:10px;">Thoroughbred vs Special</div>
+        </div>
+        <div class="ts-table-wrap">
+          <table class="ts-table">
+            <thead><tr><th>Weight Set</th><th>1st</th><th>2nd</th><th>3rd</th></tr></thead>
+            <tbody>
+              <tr><td>Thoroughbred</td><td class="ts-num">${def.p1} (${def.s1})</td><td class="ts-num">${def.p2} (${def.s2})</td><td class="ts-num">${def.p3} (${def.s3})</td></tr>
+              <tr><td>Special</td><td class="ts-num">${spec.p1} (${spec.s1})</td><td class="ts-num">${spec.p2} (${spec.s2})</td><td class="ts-num">${spec.p3} (${spec.s3})</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="ts-muted" style="font-size:10px;margin:6px 0 2px;">Export — Thoroughbred:</div>
+        <div class="ts-code-block" style="color:var(--ts-fg);word-break:break-all;user-select:all;font-size:10.5px;">${def.pipeString}</div>
+        <div class="ts-muted" style="font-size:10px;margin:6px 0 2px;">Export — Special:</div>
+        <div class="ts-code-block" style="color:var(--ts-fg);word-break:break-all;user-select:all;font-size:10.5px;">${spec.pipeString}</div>
       </div>
     `;
   }
@@ -1880,8 +2070,19 @@
           </div>
         </div>
 
-        <div class="ts-status-pill">
-          <span style="color:var(--ts-green);font-weight:700;">${activeStartersCount}</span> Active Starters &nbsp;|&nbsp; <span style="color:var(--ts-red);font-weight:700;">${scratchedHorsesCount}</span> Scratched
+        <div style="display:flex;align-items:center;gap:8px;">
+          <div class="ts-status-pill" style="flex:1;">
+            <span style="color:var(--ts-green);font-weight:700;">${activeStartersCount}</span> Active Starters &nbsp;|&nbsp; <span style="color:var(--ts-red);font-weight:700;">${scratchedHorsesCount}</span> Scratched
+          </div>
+          ${cachedBreed === 'Thoroughbred' ? `
+          <label class="ts-toggle-row" title="Compare Thoroughbred vs Special weights for this race — for researching whether a track might benefit from a stronger live-odds weight">
+            <span class="ts-toggle-switch">
+              <input type="checkbox" id="ts-weight-compare-toggle" ${dualWeightTestMode ? 'checked' : ''}>
+              <span class="ts-toggle-slider"></span>
+            </span>
+            Wt Compare
+          </label>
+          ` : ''}
         </div>
       </div>
 
@@ -1904,12 +2105,34 @@
         ${gapTableHtml}
 
         <div class="ts-section-label">Wager Recommendations</div>
-        <div class="ts-code-block" style="color:var(--ts-cyan);">
-          <b style="color:var(--ts-fg);">Scenario:</b> ${modelRes.wagerRecs.scenario}<br/><br/>
-          <b style="color:var(--ts-fg);">Option A:</b><br/> ${modelRes.wagerRecs.optionA}<br/><br/>
-          <b style="color:var(--ts-fg);">Option B:</b><br/> ${modelRes.wagerRecs.optionB}
+        <div class="ts-italic ts-muted" style="margin-bottom:6px;">${modelRes.wagerRecs.scenario}</div>
+        <div class="ts-table-wrap">
+          <table class="ts-table">
+            <thead><tr>
+              <th>Option</th><th>Bet Size ($)</th><th>Type</th><th>#</th><th>Payout ($)</th><th>Hit Rate (%)</th>
+            </tr></thead>
+            <tbody>
+              ${modelRes.wagerRecs.optionRows.map(o => o.isPass ? `
+                <tr>
+                  <td>${o.label}</td>
+                  <td class="ts-num ts-muted">—</td>
+                  <td class="ts-muted" colspan="4">${o.passReason}</td>
+                </tr>` : `
+                <tr>
+                  <td>${o.label}</td>
+                  <td class="ts-num">$${o.stake}</td>
+                  <td>${o.typeLabel}</td>
+                  <td>${o.horses}</td>
+                  <td class="ts-num">${o.payoutLow.toFixed(2) === o.payoutHigh.toFixed(2) ? '$' + o.payoutLow.toFixed(2) : '$' + o.payoutLow.toFixed(2) + '–$' + o.payoutHigh.toFixed(2)}</td>
+                  <td class="ts-num">${(o.hitProb * 100).toFixed(0)}%</td>
+                </tr>`
+              ).join('')}
+            </tbody>
+          </table>
         </div>
       </div>
+
+      ${dualWeightTestMode && cachedBreed === 'Thoroughbred' ? getWeightComparisonSectionHtml(calculateModelOutput('Thoroughbred'), calculateModelOutput('Special')) : ''}
 
       ${getTestingExportSectionHtml(modelRes)}
       `}
@@ -2002,6 +2225,7 @@
         cachedPlacePoolTotal = parsedPools.placeTotal;
         cachedShowPoolTotal = parsedPools.showTotal;
         cachedShowPoolAvailable = parsedPools.showAvailable;
+        cachedPoolsWasPercentMode = parsedPools.detectedPercentMode;
         loadedTabs['Pools'] = true;
         updateOverlay();
       }
