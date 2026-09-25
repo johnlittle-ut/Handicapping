@@ -6,6 +6,12 @@
 
   // Loader, Tab & Calculation Tracking State
   const REQUIRED_TABS = ['Summary', 'Advanced', 'Speed', 'Class', 'Pace', 'Comments', 'Pools', 'Probables'];
+
+  // The numeric fields that feed the base score (used both for mean-imputing missing values in
+  // calculateModelOutput, and for the data-stability fingerprint below — same list, since the
+  // instability bug this fixes is specifically caused by these fields still trickling in after the
+  // tab-click-based "loaded" signal fires).
+  const SCORING_NUM_FIELDS = ['PRM_PWR', 'AVG_SPD', 'BACK_SPD', 'SPD_LR', 'AVG_CLS', 'LAST_CLS', 'AVG_DIST_SPD', 'BEST_SPD', 'W_JKY', 'W_TRN', 'E1', 'E2', 'LP', 'DAYS_OFF'];
   let loadedTabs = {
     'Summary': false,
     'Advanced': false,
@@ -44,12 +50,180 @@
     }
   }
 
+  // Dracula-themed stylesheet for the overlay. Scoped entirely under #ts-model-overlay so it can
+  // never leak into TwinSpires' own page styles. Classes replace what used to be large repeated
+  // inline style="" blocks throughout every render function, and give the tables below a single
+  // consistent, mobile-safe look instead of hand-tuned pixel values scattered everywhere.
+  function applyOverlayThemeCSS() {
+    if (document.getElementById('ts-dracula-theme')) return;
+    const style = document.createElement('style');
+    style.id = 'ts-dracula-theme';
+    style.textContent = `
+      #ts-model-overlay {
+        --ts-bg: #282a36;
+        --ts-bg-panel: #21222c;
+        --ts-bg-code: #191a21;
+        --ts-border: #44475a;
+        --ts-border-soft: #383a4a;
+        --ts-border-accent: #6272a4;
+        --ts-fg: #f8f8f2;
+        --ts-fg-muted: #8892b0;
+        --ts-purple: #bd93f9;
+        --ts-cyan: #8be9fd;
+        --ts-green: #50fa7b;
+        --ts-red: #ff5555;
+        --ts-yellow: #f1fa8c;
+        --ts-orange: #ffb86c;
+        --ts-pink: #ff79c6;
+        --ts-font-mono: 'Cascadia Code','Fira Code','JetBrains Mono',ui-monospace,SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;
+        --ts-font-ui: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+
+        background: var(--ts-bg);
+        color: var(--ts-fg);
+        font-family: var(--ts-font-ui);
+        font-size: 13px;
+        line-height: 1.45;
+        -webkit-font-smoothing: antialiased;
+      }
+      #ts-model-overlay * { box-sizing: border-box; }
+
+      #ts-model-overlay .ts-panel {
+        background: var(--ts-bg-panel);
+        padding: 10px 12px;
+        border-radius: 8px;
+        margin-bottom: 12px;
+        border: 1px solid var(--ts-border-accent);
+      }
+      #ts-model-overlay .ts-panel-title {
+        color: var(--ts-orange);
+        font-weight: 700;
+        margin-bottom: 6px;
+        font-size: 12.5px;
+        letter-spacing: 0.2px;
+      }
+      #ts-model-overlay .ts-section-label {
+        color: var(--ts-pink);
+        font-weight: 700;
+        margin: 10px 0 5px;
+        font-size: 11.5px;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+      }
+      #ts-model-overlay .ts-section-label:first-child { margin-top: 0; }
+      #ts-model-overlay .ts-muted { color: var(--ts-fg-muted); }
+      #ts-model-overlay .ts-italic { font-style: italic; }
+      #ts-model-overlay .ts-code-block {
+        background: var(--ts-bg-code);
+        padding: 7px 9px;
+        border-radius: 6px;
+        font-family: var(--ts-font-mono);
+        font-size: 11.5px;
+        color: var(--ts-fg);
+        overflow-y: auto;
+      }
+      #ts-model-overlay .ts-row-flex {
+        display: flex; align-items: center; justify-content: space-between;
+      }
+      #ts-model-overlay .ts-btn {
+        background: var(--ts-bg-code);
+        border: 1px solid var(--ts-border-accent);
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-weight: 700;
+        font-size: 11.5px;
+        font-family: var(--ts-font-ui);
+        cursor: pointer;
+        color: var(--ts-fg);
+      }
+      #ts-model-overlay .ts-btn-move { color: var(--ts-yellow); cursor: move; }
+      #ts-model-overlay .ts-btn-reset { background: var(--ts-purple); color: #282a36; border-color: var(--ts-purple); }
+      #ts-model-overlay .ts-status-pill {
+        color: var(--ts-fg-muted);
+        font-size: 11.5px;
+        text-align: center;
+        background: var(--ts-bg-code);
+        padding: 5px;
+        border-radius: 6px;
+        border: 1px solid var(--ts-border-soft);
+      }
+      #ts-model-overlay .ts-badge {
+        font-size: 9.5px;
+        font-weight: 700;
+        border-radius: 4px;
+        padding: 1px 5px;
+        margin-left: 5px;
+        white-space: nowrap;
+      }
+      #ts-model-overlay .ts-badge-scratched { color: var(--ts-red); border: 1px solid var(--ts-red); }
+
+      /* Tables (leaderboard, gaps, wet bonus) */
+      #ts-model-overlay .ts-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      #ts-model-overlay .ts-table { width: 100%; border-collapse: collapse; font-family: var(--ts-font-mono); font-size: 12px; }
+      #ts-model-overlay .ts-table th {
+        text-align: left; color: var(--ts-purple); font-weight: 700;
+        padding: 5px 7px; border-bottom: 1px solid var(--ts-border); white-space: nowrap;
+      }
+      #ts-model-overlay .ts-table td { padding: 5px 7px; border-bottom: 1px solid var(--ts-border-soft); vertical-align: top; color: var(--ts-fg); }
+      #ts-model-overlay .ts-table tbody tr:nth-child(even) { background: rgba(248,248,242,0.03); }
+      #ts-model-overlay .ts-table .ts-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      #ts-model-overlay .ts-table .ts-horse-cell { white-space: normal; min-width: 130px; }
+      #ts-model-overlay .ts-table tr.ts-scratched td { opacity: 0.55; }
+      #ts-model-overlay .ts-table tr.ts-scratched .ts-horse-name { text-decoration: line-through; color: var(--ts-red); }
+      /* The 9-column leaderboard table needs more room than the container's own width to avoid
+         cramping/overlapping long horse names — let it exceed 100% and scroll horizontally via
+         .ts-table-wrap rather than force-squeezing every column. */
+      #ts-model-overlay .ts-table-leaderboard { width: auto; min-width: 100%; }
+
+      /* Readable at small sizes on mobile */
+      @media (max-width: 480px) {
+        #ts-model-overlay { font-size: 13.5px; }
+        #ts-model-overlay .ts-table { font-size: 12.5px; }
+        #ts-model-overlay .ts-table th, #ts-model-overlay .ts-table td { padding: 6px 5px; }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
   let isLoaderVisible = true;
   let isCalculating = false;
   let calcProgressPercent = 0;
   let calcInterval = null;
   let collectionStartTime = Date.now();
   let collectionTicker = null;
+
+  // Tracks each horse's rank/score from the last LIVE (post-finalization) render, so rank/score
+  // movements can be shown as they happen instead of a static top-pick highlight. Only updated
+  // once finalized — see updateOverlay() — so the first visible render starts neutral rather than
+  // comparing against pre-finalization data that was still settling.
+  let previousRankScoreMap = {};
+  const CHANGE_INDICATOR_DURATION_MS = 20000; // how long a change stays highlighted, independent of render frequency
+
+  // Data-stability tracking. Tab-click detection only proves a tab's fetch was triggered, not that
+  // its data has actually finished arriving and merging — TwinSpires keeps sending per-horse field
+  // updates in the background after that. Fingerprinting the actual scoring fields and requiring
+  // them to hold steady for a few seconds catches that, instead of trusting tab clicks alone.
+  let lastFieldFingerprint = null;
+  let fieldStableSince = null;
+  const FIELD_STABILITY_WINDOW_MS = 6000;
+
+  function computeFieldFingerprint() {
+    let liveHorses = Object.values(cachedHorsesMap)
+      .filter(h => !h.IS_SCRATCHED && !cachedScratchedMap[h.PROGRAM])
+      .sort((a, b) => String(a.PROGRAM).localeCompare(String(b.PROGRAM), undefined, { numeric: true }));
+    return liveHorses.map(h => SCORING_NUM_FIELDS.map(f => h[f]).join(',')).join('|');
+  }
+
+  // Updates the fingerprint/timer as a side effect, then reports whether the data has been
+  // unchanged for at least FIELD_STABILITY_WINDOW_MS. Call once per render pass.
+  function checkFieldStability() {
+    let fp = computeFieldFingerprint();
+    if (fp !== lastFieldFingerprint) {
+      lastFieldFingerprint = fp;
+      fieldStableSince = Date.now();
+      return false;
+    }
+    return fieldStableSince !== null && (Date.now() - fieldStableSince) >= FIELD_STABILITY_WINDOW_MS;
+  }
 
   function getLoadingProgress() {
     let hasComments = Object.values(cachedHorsesMap).some(h => 
@@ -83,7 +257,7 @@
     if (!outline) {
       outline = document.createElement('div');
       outline.id = 'ts-zoom-outline';
-      outline.style.cssText = 'position:fixed;z-index:1000000;border:2px dashed #60a5fa;background:rgba(59,130,246,0.18);pointer-events:none;border-radius:8px;box-shadow:0 0 15px rgba(96,165,250,0.4);transition:none;';
+      outline.style.cssText = 'position:fixed;z-index:1000000;border:2px dashed #bd93f9;background:rgba(189,147,249,0.15);pointer-events:none;border-radius:8px;box-shadow:0 0 15px rgba(189,147,249,0.4);transition:none;';
       document.body.appendChild(outline);
     }
 
@@ -129,7 +303,18 @@
     cachedStatsCsv = "Awaiting Race Stats Data...";
     cachedTrackCondition = "";
     cachedPostTime = "N/A";
+    cachedExactaGrid = {};
+    cachedExactaPoolTotal = 0;
+    cachedExactaBaseUnit = 1;
+    cachedPoolsMap = {};
+    cachedWinPoolTotal = 0;
+    cachedPlacePoolTotal = 0;
+    cachedShowPoolTotal = 0;
+    cachedShowPoolAvailable = false;
     REQUIRED_TABS.forEach(tab => loadedTabs[tab] = false);
+    previousRankScoreMap = {};
+    lastFieldFingerprint = null;
+    fieldStableSince = null;
     
     isLoaderVisible = true;
     isCalculating = false;
@@ -264,6 +449,14 @@
   let cachedScratchedMap = {};
   let cachedStatsObj = null;
   let cachedStatsCsv = "Awaiting Race Stats Data...";
+  let cachedExactaGrid = {};      // cachedExactaGrid[fromProgram][toProgram] = real $-per-base-unit payout, or null if scratched/invalid
+  let cachedExactaPoolTotal = 0;
+  let cachedExactaBaseUnit = 1;   // the track's minimum exacta base bet, read from the payload (usually $1)
+  let cachedPoolsMap = {};        // cachedPoolsMap[program] = { win, place, show } — real $ amounts wagered per horse (pool share), per $1 base
+  let cachedWinPoolTotal = 0;
+  let cachedPlacePoolTotal = 0;
+  let cachedShowPoolTotal = 0;
+  let cachedShowPoolAvailable = false;
 
   const ROUTE_IGNORE_LIST = [
     'bet', 'bets', 'betting', 'race', 'races', 'handicapping', 
@@ -272,11 +465,25 @@
     'pools', 'probables'
   ];
 
-  function isHeavyWetTrack(condVal) {
-    if (!condVal) return false;
+  // Shared takeout assumption used to convert pool-distribution $ amounts into real payouts,
+  // and as the fallback exacta payout estimator's discount. Validated against a real UK Haydock
+  // WIN pool (~18% reproduced the track's displayed odds almost exactly).
+  const TAKEOUT_RATE = 0.18;
+
+  // Returns wetness tier: 0 = dry/fast/firm, 1 = off/yielding (moderately wet), 2 = sloppy/muddy/heavy (fully wet)
+  function getWetnessTier(condVal) {
+    if (!condVal) return 0;
     let c = String(condVal).toUpperCase().trim();
-    const wetKeywords = ['MUDDY', 'SLOPPY', 'HEAVY', 'YIELDING', 'SOFT', 'WET', 'MY', 'SY', 'HY', 'YL', 'SF', 'WF'];
-    return wetKeywords.some(k => c === k || c.includes(k));
+    const tier2Keywords = ['MUDDY', 'SLOPPY', 'HEAVY', 'WET', 'MY', 'SY', 'HY', 'WF'];
+    const tier1Keywords = ['YIELDING', 'SOFT', 'YL', 'SF'];
+    if (tier2Keywords.some(k => c === k || c.includes(k))) return 2;
+    if (tier1Keywords.some(k => c === k || c.includes(k))) return 1;
+    return 0;
+  }
+
+  // Kept for the one existing dry/wet-only reference (power bonus messaging); tier 1 or 2 both count as "wet"
+  function isHeavyWetTrack(condVal) {
+    return getWetnessTier(condVal) > 0;
   }
 
   function getActiveTrackName(payloadObj) {
@@ -359,8 +566,8 @@
     if (!obj) return defaultVal;
     let keyList = Array.isArray(keys) ? keys : [keys];
     for (let k of keyList) {
-      if (obj[k] !== undefined && obj[k] !== null) {
-        let val = obj[k];
+      let val = obj[k];
+      if (val !== undefined && val !== null && typeof val !== 'object') {
         if (typeof val === 'number') return val;
         let cleaned = String(val).replace('%', '').trim();
         let parsed = parseFloat(cleaned);
@@ -374,8 +581,28 @@
     if (!obj) return defaultVal;
     let keyList = Array.isArray(keys) ? keys : [keys];
     for (let k of keyList) {
-      if (obj[k] !== undefined && obj[k] !== null) {
-        return String(obj[k]).trim();
+      let val = obj[k];
+      if (val === undefined || val === null) continue;
+
+      // Some fields (e.g. commentsPositive/commentsNegative) legitimately arrive as an ARRAY of
+      // strings rather than one flat string — join them into a readable single string. An empty
+      // array (a horse with no negative comments, say) correctly falls through to the next
+      // candidate key / the default, rather than being treated as present-but-blank.
+      if (Array.isArray(val)) {
+        let joined = val
+          .filter(v => v !== null && v !== undefined && String(v).trim() !== '')
+          .map(v => String(v).trim())
+          .join('; ');
+        if (joined !== '') return joined;
+        continue;
+      }
+
+      // Guard against object-typed payload fields (e.g. a structured {numerator, denominator}
+      // odds object on some responses instead of a flat "7/5" string) — String() on a plain
+      // object produces the literal text "[object Object]", which would otherwise silently
+      // overwrite a perfectly good previously-merged value. Skip and try the next candidate key.
+      if (typeof val !== 'object') {
+        return String(val).trim();
       }
     }
     return defaultVal;
@@ -433,6 +660,139 @@
       }
     }
     return null;
+  }
+
+  // Finds the Exotics probables payload (e.g. the Exacta probable-payout grid from the Probables tab)
+  function findExoticsPayload(obj, depth = 0) {
+    if (!obj || typeof obj !== 'object' || depth > 5) return null;
+    if (obj.Exotics && Array.isArray(obj.Exotics.RunList)) return obj;
+    if (Array.isArray(obj)) {
+      for (let item of obj) {
+        let found = findExoticsPayload(item, depth + 1);
+        if (found) return found;
+      }
+    } else {
+      for (let key in obj) {
+        if (typeof obj[key] === 'object' && obj[key] !== null) {
+          let found = findExoticsPayload(obj[key], depth + 1);
+          if (found) return found;
+        }
+      }
+    }
+    return null;
+  }
+
+  // Parses the Exotics payload into a { grid, poolTotal, baseUnit, poolType } object.
+  // grid[fromProgram][toProgram] = real $ payout per baseUnit stake, or null if self/scratched (-1.00 / -2.00 sentinels).
+  function parseExoticsGrid(payload) {
+    let grid = {};
+    let totalsRow = (payload.poolTotalsModels && payload.poolTotalsModels[0]) || {};
+    let poolTotal = getVal(totalsRow, 'Amount', 0);
+    let baseUnit = getVal(totalsRow, 'Base', 1) || 1;
+    let poolType = getStr(payload, 'poolType', 'EX');
+
+    let runList = (payload.Exotics && payload.Exotics.RunList) || [];
+    runList.forEach(row => {
+      let from = String(row.ProgramNumber);
+      grid[from] = grid[from] || {};
+      (row.Combos || []).forEach(c => {
+        let to = String(c.With);
+        let amt = parseFloat(c.Amount);
+        grid[from][to] = (isNaN(amt) || amt < 0) ? null : amt;
+      });
+    });
+
+    return { grid, poolTotal, baseUnit, poolType };
+  }
+
+  // Real per-$1 exacta payout for "from" finishing 1st and "to" finishing 2nd, or null if unavailable.
+  function getExactaPayout(from, to) {
+    let f = String(from), t = String(to);
+    if (cachedExactaGrid[f] && cachedExactaGrid[f][t] !== undefined && cachedExactaGrid[f][t] !== null) {
+      // grid values are per cachedExactaBaseUnit stake; normalize to a true per-$1 rate
+      return cachedExactaGrid[f][t] / (cachedExactaBaseUnit || 1);
+    }
+    return null;
+  }
+
+  // Finds the WPSPools payload (Win/Place/Show pool distribution from the Pools tab)
+  function findPoolsPayload(obj, depth = 0) {
+    if (!obj || typeof obj !== 'object' || depth > 5) return null;
+    if (obj.WPSPools && Array.isArray(obj.WPSPools.Entries)) return obj;
+    if (Array.isArray(obj)) {
+      for (let item of obj) {
+        let found = findPoolsPayload(item, depth + 1);
+        if (found) return found;
+      }
+    } else {
+      for (let key in obj) {
+        if (typeof obj[key] === 'object' && obj[key] !== null) {
+          let found = findPoolsPayload(obj[key], depth + 1);
+          if (found) return found;
+        }
+      }
+    }
+    return null;
+  }
+
+  // Parses the WPSPools payload. Win/Place/Show are $ amounts WAGERED on each horse (pool share),
+  // NOT payouts — confirmed by summing to the pool totals. Real payouts are derived separately
+  // via the pari-mutuel formula in getWinPoolPayout/getPlacePoolPayout below.
+  function parsePoolsPayload(payload) {
+    let poolTotalsArr = payload.PoolTotals || [];
+    let winTotal = 0, placeTotal = 0, showTotal = 0, winBase = 1, placeBase = 1, showBase = 1;
+    poolTotalsArr.forEach(p => {
+      let type = getStr(p, 'PoolType', '');
+      if (type === 'WN') { winTotal = getVal(p, 'Amount', 0); winBase = getVal(p, 'Base', 1) || 1; }
+      else if (type === 'PL') { placeTotal = getVal(p, 'Amount', 0); placeBase = getVal(p, 'Base', 1) || 1; }
+      else if (type === 'SH') { showTotal = getVal(p, 'Amount', 0); showBase = getVal(p, 'Base', 1) || 1; }
+    });
+
+    let entries = (payload.WPSPools && payload.WPSPools.Entries) || [];
+    let poolsMap = {};
+    let anyShow = false;
+    entries.forEach(e => {
+      let prog = getStr(e, 'ProgramNumber');
+      let winAmt = getVal(e, 'Win', NaN);
+      let placeAmt = getVal(e, 'Place', NaN);
+      let showAmt = getVal(e, 'Show', NaN);
+      if (showAmt > 0) anyShow = true;
+      poolsMap[prog] = {
+        win: (isNaN(winAmt) || winAmt < 0) ? null : winAmt / winBase,
+        place: (isNaN(placeAmt) || placeAmt < 0) ? null : placeAmt / placeBase,
+        show: (isNaN(showAmt) || showAmt <= 0) ? null : showAmt / showBase
+      };
+    });
+
+    return { poolsMap, winTotal, placeTotal, showTotal, showAvailable: anyShow };
+  }
+
+  // Real total return per $1 WIN bet (includes stake), via the standard pari-mutuel formula:
+  // (Pool Total x (1 - takeout)) / $ wagered on this horse. Returns null if pool data unavailable.
+  function getWinPoolPayout(program) {
+    let entry = cachedPoolsMap[String(program)];
+    if (!entry || entry.win === null || entry.win <= 0 || !cachedWinPoolTotal) return null;
+    let netPool = cachedWinPoolTotal * (1 - TAKEOUT_RATE);
+    return netPool / entry.win;
+  }
+
+  // Real total return per $1 PLACE bet, same formula applied to the place pool. This is an
+  // approximation — true place-pool math depends jointly on whichever OTHER horse also places,
+  // which can't be known in advance — but it's a standard simplification and far better than guessing.
+  function getPlacePoolPayout(program) {
+    let entry = cachedPoolsMap[String(program)];
+    if (!entry || entry.place === null || entry.place <= 0 || !cachedPlacePoolTotal) return null;
+    let netPool = cachedPlacePoolTotal * (1 - TAKEOUT_RATE);
+    return netPool / entry.place;
+  }
+
+  // Real total return per $1 SHOW bet, same pari-mutuel simplification as PLACE — an approximation,
+  // since true show-pool payout depends jointly on whichever other two horses also finish top 3.
+  function getShowPoolPayout(program) {
+    let entry = cachedPoolsMap[String(program)];
+    if (!entry || entry.show === null || entry.show <= 0 || !cachedShowPoolTotal) return null;
+    let netPool = cachedShowPoolTotal * (1 - TAKEOUT_RATE);
+    return netPool / entry.show;
   }
 
   function parseAndMergeRunnerRow(r) {
@@ -522,9 +882,67 @@
       return numA - numB;
     });
 
-    let headerRow = Object.keys(sorted[0]).join(',');
-    let dataRows = sorted.map(h => Object.values(h).join(',')).join('\n');
+    let liveProgramNumbers = sorted.filter(h => !h.IS_SCRATCHED && !cachedScratchedMap[h.PROGRAM]).map(h => h.PROGRAM);
+
+    // Extends each raw horse row with the DERIVED values the model actually computes/uses from
+    // that raw data (parsed odds, real pool payout rates, one sample exacta combo) — so blanks or
+    // parsing failures downstream of the raw fields are visible here too, not just missing raw data.
+    let extendedRows = sorted.map(h => {
+      let mlDec = parseOddsToDecimal(h.ML_ODDS);
+      let liveDec = parseOddsToDecimal(h.LIVE_ODDS);
+      let oddsNumeric = !isNaN(liveDec) && liveDec > 0 ? liveDec : mlDec;
+
+      let poolEntry = cachedPoolsMap[h.PROGRAM];
+      let winPayout = getWinPoolPayout(h.PROGRAM);
+      let placePayout = getPlacePoolPayout(h.PROGRAM);
+      let showPayout = getShowPoolPayout(h.PROGRAM);
+
+      // One sample exacta combo per horse (paired with the first other live horse) — just enough
+      // to confirm the Probables grid actually loaded data for this horse, without dumping the
+      // full N-1 row of combos per horse.
+      let otherProg = liveProgramNumbers.find(p => p !== h.PROGRAM);
+      let exactaSample = '""';
+      if (otherProg) {
+        let payout = getExactaPayout(h.PROGRAM, otherProg);
+        exactaSample = `"#${h.PROGRAM}/#${otherProg}: ${payout !== null ? '$' + payout.toFixed(2) : 'N/A'}"`;
+      }
+
+      return Object.assign({}, h, {
+        ODDS_NUMERIC: !isNaN(oddsNumeric) ? oddsNumeric : '',
+        WIN_POOL_AMT: (poolEntry && poolEntry.win !== null) ? poolEntry.win : '',
+        PLACE_POOL_AMT: (poolEntry && poolEntry.place !== null) ? poolEntry.place : '',
+        SHOW_POOL_AMT: (poolEntry && poolEntry.show !== null) ? poolEntry.show : '',
+        WIN_PAYOUT_RATE: winPayout !== null ? winPayout.toFixed(2) : '',
+        PLACE_PAYOUT_RATE: placePayout !== null ? placePayout.toFixed(2) : '',
+        SHOW_PAYOUT_RATE: showPayout !== null ? showPayout.toFixed(2) : '',
+        EXACTA_SAMPLE: exactaSample
+      });
+    });
+
+    let headerRow = Object.keys(extendedRows[0]).join(',');
+    let dataRows = extendedRows.map(h => Object.values(h).join(',')).join('\n');
     return `${headerRow}\n${dataRows}`;
+  }
+
+  // Race-wide values (not per-horse) the model reads — pool totals, condition/wetness detection,
+  // exacta base unit, and the takeout constant used across the payout formulas. Kept as a separate
+  // small CSV block since it's a different schema than the per-horse rows or the meet/week IV stats.
+  function getRaceWidePoolsCsv() {
+    let header = 'WIN_POOL_TOTAL,PLACE_POOL_TOTAL,SHOW_POOL_TOTAL,SHOW_POOL_AVAILABLE,EXACTA_POOL_TOTAL,EXACTA_BASE_UNIT,TRACK_CONDITION,WETNESS_TIER,POST_TIME,TAKEOUT_RATE';
+    let wetnessTier = getWetnessTier(cachedTrackCondition);
+    let row = [
+      cachedWinPoolTotal || 0,
+      cachedPlacePoolTotal || 0,
+      cachedShowPoolTotal || 0,
+      cachedShowPoolAvailable,
+      cachedExactaPoolTotal || 0,
+      cachedExactaBaseUnit || 1,
+      cachedTrackCondition ? `"${cachedTrackCondition}"` : '""',
+      wetnessTier,
+      cachedPostTime ? `"${cachedPostTime}"` : '""',
+      TAKEOUT_RATE
+    ].join(',');
+    return `${header}\n${row}`;
   }
 
   function parseStatsRows(s) {
@@ -600,9 +1018,16 @@
       'Special': { W_Speed: 0.17, W_Power: 0.08, W_Class: 0.15, W_Distance: 0.08, W_Driver: 0.06, W_Trainer: 0.09, W_Early: 0.14, W_Finish: 0.11, W_Recency: 0.03, W_Market: 0.09 }
     };
 
-    let isSpecialTrack = cleanTrack.toLowerCase().includes('churchill') || 
-                         cleanTrack.toLowerCase().includes('horseshoe indianapolis') || 
-                         cleanTrack.toLowerCase().includes('indiana grand');
+    // Tracks using the back-tested "Special" weight set instead of default Thoroughbred weights.
+    // Deliberately hardcoded rather than inferred from live pool size — pool totals can nearly
+    // double in the final minute to post at major tracks (computer-automated betting), which would
+    // make a live-data threshold change the weight set out from under a bet you already decided on.
+    // Only add a track here after independently testing it the way Churchill and Horseshoe
+    // Indianapolis were tested — this list should never be a guess.
+    const SPECIAL_WEIGHT_TRACKS = ['churchill', 'horseshoe indianapolis'];
+
+    let isSpecialTrack = cleanBreed === 'Thoroughbred' &&
+      SPECIAL_WEIGHT_TRACKS.some(t => cleanTrack.toLowerCase().includes(t));
 
     let activeWeightKey = isSpecialTrack ? 'Special' : (weightsDict[cleanBreed] ? cleanBreed : 'Thoroughbred');
     let activeWeights = Object.assign({}, weightsDict[activeWeightKey]);
@@ -660,9 +1085,11 @@
 
     ruleAppliedMsg += ` | [Weight Set: ${activeWeightKey}]`;
 
-    let isWet = isHeavyWetTrack(cachedTrackCondition);
+    let wetnessTier = getWetnessTier(cachedTrackCondition);
+    let isWet = wetnessTier > 0;
     if (isWet) {
-      ruleAppliedMsg += ` | [Track Condition: ${cachedTrackCondition.toUpperCase()} — Power Bonus Zeroed]`;
+      let tierLabel = wetnessTier === 2 ? 'Tier 2: Sloppy/Muddy/Heavy' : 'Tier 1: Off/Yielding';
+      ruleAppliedMsg += ` | [Track Condition: ${cachedTrackCondition.toUpperCase()} — ${tierLabel} — Power Bonus Zeroed]`;
     }
 
     let activeSpeedBias = (wWeek * weekBias) + (wMeet * meetBias);
@@ -723,9 +1150,25 @@
       return 0.0;
     }
 
+    // Wet-track early-speed bonus: on off/sloppy/muddy tracks, front-runners and early-pace
+    // horses tend to benefit (clear of kickback, firmer worked-up ground). Pure closers get none.
+    // This stacks ON TOP OF calcStyleBonus's 5.0 cap rather than sharing it, since it reflects a
+    // separate signal (today's track condition) rather than the meet/week run-style IV data.
+    const WET_STYLE_FACTOR = { 'E': 1.0, 'E/P': 0.65, 'P': 0.25, 'S': 0.0 };
+    const WET_TIER_MAX_BONUS = { 1: 0.75, 2: 1.5 }; // tier 1 = off/yielding, tier 2 = sloppy/muddy/heavy
+
+    function calcWetStyleBonus(code, pts, tier) {
+      if (!tier || tier < 1) return 0.0;
+      let styleFactor = WET_STYLE_FACTOR[code] !== undefined ? WET_STYLE_FACTOR[code] : 0.0;
+      if (styleFactor <= 0.0) return 0.0;
+      let ptsFactor = Math.min(Math.max(parseFloat(pts) / 8.0, 0.0), 1.0);
+      let maxBonus = WET_TIER_MAX_BONUS[tier] || 0.0;
+      return Math.round(maxBonus * styleFactor * ptsFactor * 100) / 100;
+    }
+
     let runners = Object.values(cachedHorsesMap).map(h => Object.assign({}, h));
 
-    let numCols = ['PRM_PWR', 'AVG_SPD', 'BACK_SPD', 'SPD_LR', 'AVG_CLS', 'LAST_CLS', 'AVG_DIST_SPD', 'BEST_SPD', 'W_JKY', 'W_TRN', 'E1', 'E2', 'LP', 'DAYS_OFF'];
+    let numCols = SCORING_NUM_FIELDS;
     numCols.forEach(col => {
       let validVals = runners.map(r => parseFloat(r[col]) || 0).filter(v => v > 0);
       let avg = validVals.length > 0 ? validVals.reduce((a, b) => a + b, 0) / validVals.length : 0.0;
@@ -802,14 +1245,16 @@
       let postCat = getPostCat(r.POST);
       let postBonus = calcPostBonus(postCat);
       let styleBonus = calcStyleBonus(r.RUN_STYLE, r.RUN_STYLE_PTS);
+      let wetBonus = calcWetStyleBonus(r.RUN_STYLE, r.RUN_STYLE_PTS, wetnessTier);
 
       r.POWER_BONUS = powerBonus;
       r.BASE_SKILL = Math.round(baseSkill * 100) / 100;
       r.POST_BONUS = postBonus;
       r.STYLE_BONUS = styleBonus;
+      r.WET_BONUS = wetBonus;
 
       // Calculate candidate final score
-      let calculatedScore = Math.round((baseSkill + postBonus + styleBonus + powerBonus) * 100) / 100;
+      let calculatedScore = Math.round((baseSkill + postBonus + styleBonus + powerBonus + wetBonus) * 100) / 100;
 
       // Zero out final score at the very end if scratched
       if (r.IS_SCRATCHED === true || cachedScratchedMap[r.PROGRAM]) {
@@ -843,105 +1288,281 @@
     let gap13 = Math.round((s1 - s3) * 100) / 100;
     let gap14 = Math.round((s1 - s4) * 100) / 100;
 
-    let p1 = top1 ? top1.PROGRAM : "N/A";
-    let p2 = top2 ? top2.PROGRAM : "N/A";
-    let p3 = top3 ? top3.PROGRAM : "N/A";
-    let p4 = top4 ? top4.PROGRAM : "N/A";
+    // ---------------------------------------------------------------
+    // WAGER RECOMMENDATION ENGINE (probability + expected-value based)
+    // ---------------------------------------------------------------
+    // Replaces the old static point-gap tiers with:
+    //  1) A blended win-probability model (market-implied probability, tilted by our score edge)
+    //  2) Harville-derived exacta/box hit probabilities from those win probabilities
+    //  3) Real exacta payouts from the Probables tab (cachedExactaGrid) when available,
+    //     falling back to a generalized odds-derived estimate only if that grid hasn't loaded yet
+    //  4) Expected value (EV) per dollar for every candidate bet, dynamically priced $2-$6
+    //     off the size of the edge, instead of fixed tier dollar amounts
 
-    let odds1 = top1 && !isNaN(top1.ODDS_NUMERIC) ? top1.ODDS_NUMERIC : NaN;
-    let odds2 = top2 && !isNaN(top2.ODDS_NUMERIC) ? top2.ODDS_NUMERIC : NaN;
+    let liveRunners = runners.filter(r => !(r.IS_SCRATCHED === true || cachedScratchedMap[r.PROGRAM]));
+    let winProbs = {}; // program -> { modelProb, zScore }
+    const MAX_Z_REF = 2.5; // cap on standardized score, avoids runaway probabilities/conviction from outlier scores
 
-    let scenario = "", optionA = "", optionB = "", optionC = null;
-    let isChurchill = cleanTrack.toLowerCase().includes("churchill") || cleanTrack.toLowerCase() === "cd";
+    // Win probability is derived ONLY from the model's own FINAL_SCORE (which already has its own
+    // market/odds component baked in via W_Market — see baseSkill). Live odds are NOT blended in here;
+    // they're used later strictly to price the WIN bet's payout, per the design correction below.
+    if (liveRunners.length >= 2) {
+      let scoreVals = liveRunners.map(r => r.FINAL_SCORE);
+      let meanScore = scoreVals.reduce((a, b) => a + b, 0) / scoreVals.length;
+      let variance = scoreVals.reduce((a, b) => a + Math.pow(b - meanScore, 2), 0) / scoreVals.length;
+      let stdevScore = Math.sqrt(variance) || 1;
 
-    let oddCount = 0, evenCount = 0;
-    topField.slice(0, 4).forEach(r => {
-      let pNum = parseInt(String(r.PROGRAM).replace(/\D/g, ''), 10);
-      if (!isNaN(pNum)) {
-        if (pNum % 2 !== 0) oddCount++;
-        else evenCount++;
-      }
-    });
+      const SCORE_PROB_K = 0.70; // controls how sharply score gaps translate into probability separation
 
-    if (gap12 < 1.5 && gap23 < 1.5) {
-      scenario = "Tier 4: Ultra-Competitive / Tight Field (Gap_1_2 < 1.5 & Gap_2_3 < 1.5)";
-      if (isChurchill && (oddCount >= 3 || evenCount >= 3)) {
-        let prefSide = oddCount >= 3 ? "ODD" : "EVEN";
-        optionA = "$0 (PASS / NO BET - Tight Field Capital Protection)";
-        optionB = `$2 Odd/Even Bet on [${prefSide}] (Churchill Special Exception: ${Math.max(oddCount, evenCount)} of top 4 picks are ${prefSide})`;
-      } else {
-        optionA = "$0 (PASS / NO BET - Capital Protection Rule)";
-        optionB = `3-Horse Exacta Box: #${p1}, #${p2}, #${p3} (6 combos / low cost speculative only)`;
-      }
-    } 
-    else if (gap12 >= 5.0) {
-      scenario = `Tier 1: Dominant Top Pick (#${p1} Gap_1_2 = ${gap12.toFixed(1)})`;
-      
-      if (!isNaN(odds1) && odds1 >= 2.0) {
-        if (gap12 >= 7.0 && odds1 >= 3.0) {
-          optionA = `$4 WIN on #${p1} (Max Value Overlay: Gap >= 7.0 & Odds >= 3/1)`;
-        } else if (odds1 >= 3.0) {
-          optionA = `$4 WIN on #${p1} (High Value Overlay: Odds >= 3/1)`;
-        } else {
-          optionA = `$3 WIN on #${p1} (Dominant Lead with Fair 2/1 to 3/1 Odds)`;
-        }
-        optionB = `Straight Exacta: #${p1} / #${p2}, #${p3}`;
-      } else {
-        let estExactaPayout = (!isNaN(odds1) && !isNaN(odds2) && odds1 > 0 && odds2 > 0) 
-          ? ((odds1 + 1) * (odds2 + 1) * 2.0) 
-          : 0;
+      let zArr = liveRunners.map(r => Math.max(-MAX_Z_REF, Math.min(MAX_Z_REF, (r.FINAL_SCORE - meanScore) / stdevScore)));
+      let rawArr = zArr.map(z => Math.exp(SCORE_PROB_K * z));
+      let rawSum = rawArr.reduce((a, b) => a + b, 0) || 1;
 
-        if (estExactaPayout >= 8.0) {
-          optionA = `$2 Straight Exacta: #${p1} over #${p2} (Exacta Pivot: Est. Payout $${estExactaPayout.toFixed(2)} >= $8.00)`;
-          optionB = `$2 or $3 PLACE on #${p2} (Secondary Value Pivot)`;
-        } else if (!isNaN(odds2) && odds2 >= 2.0) {
-          optionA = `$2 PLACE on #${p2} (Place Pivot: #${p2} offers fair value while #${p1} is low-payout)`;
-          optionB = `$2 Straight Exacta: #${p1} / #${p2}, #${p3}`;
-        } else if (!isNaN(odds1) && odds1 <= 0.5) {
-          optionA = "$0 (PASS / NO BET) - Heavy favorite (< 6/5 odds) with no exotic value";
-          optionB = `Exacta Key: #${p1} / #${p2}, #${p3}`;
-        } else {
-          optionA = `$2 PLACE on #${p1} (Safety Pivot on low Win odds)`;
-          optionB = `Exacta Key: #${p1} / #${p2}, #${p3}`;
-        }
-      }
-    } 
-    else if (gap12 >= 2.0 && gap12 < 5.0) {
-      scenario = `Tier 2: Moderate Lead (#${p1} Gap_1_2 = ${gap12.toFixed(1)})`;
-      
-      if (!isNaN(odds1) && odds1 >= 3.0) {
-        optionA = `$2 WIN on #${p1} (Odds >= 3/1 justify moderate risk)`;
-        optionB = `Exacta Box: #${p1}, #${p2}`;
-      } else {
-        optionA = `$2 PLACE on #${p1} (Safety First Pivot: Odds < 3/1 without massive score lead)`;
-        optionB = `Exacta Box: #${p1}, #${p2}`;
-      }
-    } 
-    else if (gap12 < 2.0 && gap23 >= 4.0) {
-      scenario = `Tier 3: Split Top Two (#${p1} & #${p2} separated from field)`;
-      
-      let higherOddsPick = (!isNaN(odds2) && !isNaN(odds1) && odds2 > odds1) ? p2 : p1;
-      let higherOddsVal = (!isNaN(odds2) && !isNaN(odds1) && odds2 > odds1) ? odds2 : odds1;
-
-      optionA = `$2 Exacta Box: #${p1}, #${p2} ($1 base = $2 total, covers both permutations)`;
-      optionB = `$2 PLACE on #${higherOddsPick} (Exploiting market inefficiency on under-bet pick: ${higherOddsVal > 0 ? higherOddsVal.toFixed(1) + '/1' : 'higher odds'})`;
-    } 
-    else {
-      scenario = "Standard Competitive Field";
-      optionA = (!isNaN(odds1) && odds1 >= 3.0) ? `$2 WIN on #${p1}` : `$2 PLACE on #${p1}`;
-      optionB = `Exacta Box: #${p1}, #${p2}`;
+      liveRunners.forEach((r, i) => {
+        winProbs[r.PROGRAM] = { modelProb: rawArr[i] / rawSum, zScore: zArr[i] };
+      });
     }
 
-    if (isChurchill && runners.length >= 4 && !optionC) {
-      let pref = oddCount >= evenCount ? "ODD" : "EVEN";
-      optionC = `CHURCHILL ODD/EVEN WAGER: $2 Bet on [${pref}] (${Math.max(oddCount, evenCount)} of top 4 picks are ${pref})`;
+    // Harville extension: P(A 1st, B 2nd) = P(A) * P(B) / (1 - P(A))
+    function exactaOrderProb(progA, progB) {
+      let pA = winProbs[progA] ? winProbs[progA].modelProb : 0;
+      let pB = winProbs[progB] ? winProbs[progB].modelProb : 0;
+      if (pA <= 0 || pA >= 1) return 0;
+      return pA * (pB / (1 - pA));
+    }
+
+    // Probability horse finishes 1st OR 2nd (top-2 / "place"), purely from our own score-based
+    // winProbs — same Harville logic, summed over every other horse's chance of winning with
+    // this one taking 2nd behind them. No market data involved, consistent with the WIN model.
+    function placeProbabilityOf(prog) {
+      let pi = winProbs[prog] ? winProbs[prog].modelProb : 0;
+      if (pi <= 0) return 0;
+      let sumSecond = 0;
+      liveRunners.forEach(r => {
+        if (String(r.PROGRAM) === String(prog)) return;
+        let pj = winProbs[r.PROGRAM] ? winProbs[r.PROGRAM].modelProb : 0;
+        if (pj >= 1) return;
+        sumSecond += pj * (pi / (1 - pj));
+      });
+      return Math.min(1, pi + sumSecond);
+    }
+
+    // Probability horse finishes 1st, 2nd, OR 3rd ("show"), extending the same Harville logic one
+    // level further: sum over every ordered pair of other horses taking 1st and 2nd, times this
+    // horse taking 3rd given both are gone. Purely score-derived, no market data — consistent with
+    // WIN and PLACE above.
+    function showProbabilityOf(prog) {
+      let pi = winProbs[prog] ? winProbs[prog].modelProb : 0;
+      if (pi <= 0) return 0;
+      let base = placeProbabilityOf(prog); // covers 1st + 2nd
+      let thirdSum = 0;
+      liveRunners.forEach(rj => {
+        if (String(rj.PROGRAM) === String(prog)) return;
+        let pj = winProbs[rj.PROGRAM] ? winProbs[rj.PROGRAM].modelProb : 0;
+        if (pj <= 0 || pj >= 1) return;
+        liveRunners.forEach(rk => {
+          if (String(rk.PROGRAM) === String(prog) || String(rk.PROGRAM) === String(rj.PROGRAM)) return;
+          let pk = winProbs[rk.PROGRAM] ? winProbs[rk.PROGRAM].modelProb : 0;
+          let denom2 = 1 - pj;
+          if (denom2 <= 0) return;
+          let pkGivenJ = pk / denom2;
+          let denom3 = 1 - pj - pk;
+          if (denom3 <= 0) return;
+          thirdSum += pj * pkGivenJ * (pi / denom3);
+        });
+      });
+      return Math.min(1, base + thirdSum);
+    }
+
+    // Real live probable payout when we have it; otherwise a generalized odds-based estimate (~18% takeout)
+    function exactaPayoutEstimate(progA, progB) {
+      let real = getExactaPayout(progA, progB);
+      if (real !== null) return { value: real, isReal: true };
+      let hA = cachedHorsesMap[progA], hB = cachedHorsesMap[progB];
+      let oA = hA ? (parseOddsToDecimal(hA.LIVE_ODDS) || parseOddsToDecimal(hA.ML_ODDS)) : NaN;
+      let oB = hB ? (parseOddsToDecimal(hB.LIVE_ODDS) || parseOddsToDecimal(hB.ML_ODDS)) : NaN;
+      if (isNaN(oA) || isNaN(oB) || oA <= 0 || oB <= 0) return { value: 0, isReal: false };
+      return { value: (oA + 1) * (oB + 1) * (1 - TAKEOUT_RATE), isReal: false };
+    }
+
+    // Dynamic $2-$6 stake sizing off an edge fraction (0-1), rounded to the nearest stepUnit
+    function scaleStake(edgeFraction, minTotal, maxTotal, stepUnit) {
+      let clamped = Math.max(0, Math.min(1, edgeFraction));
+      let raw = minTotal + clamped * (maxTotal - minTotal);
+      let stepped = Math.round(raw / stepUnit) * stepUnit;
+      return Math.max(minTotal, Math.min(maxTotal, stepped));
+    }
+
+    let candidates = [];
+    let baseU = cachedExactaBaseUnit || 1;
+
+    if (liveRunners.length >= 2) {
+      let ranked = liveRunners.slice().sort((a, b) =>
+        (winProbs[b.PROGRAM] ? winProbs[b.PROGRAM].modelProb : 0) - (winProbs[a.PROGRAM] ? winProbs[a.PROGRAM].modelProb : 0)
+      );
+      let c1 = ranked[0], c2 = ranked[1], c3 = ranked[2];
+
+      // --- WIN on top model pick ---
+      // Conviction (and therefore stake size) comes ONLY from how much of a score outlier the top
+      // pick is (its z-score) — never from odds or pool data. Payout prefers the REAL live pool
+      // payout (pari-mutuel formula off actual $ wagered); falls back to parsed odds text only if
+      // the Pools tab hasn't loaded yet for this race (e.g. race too far out to have wagering data).
+      if (c1) {
+        let realWinPayoutRate = getWinPoolPayout(c1.PROGRAM);
+        let hasOdds = !isNaN(c1.ODDS_NUMERIC) && c1.ODDS_NUMERIC > 0;
+        if (realWinPayoutRate !== null || hasOdds) {
+          let pWin = winProbs[c1.PROGRAM].modelProb;
+          let payoutRate = realWinPayoutRate !== null ? realWinPayoutRate : (c1.ODDS_NUMERIC + 1);
+          let conviction = Math.max(0, winProbs[c1.PROGRAM].zScore / MAX_Z_REF);
+          let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
+          let payoutIfWin = stake * payoutRate;
+          let ev = pWin * payoutIfWin - stake;
+          candidates.push({
+            type: 'WIN', label: `$${stake} WIN on #${c1.PROGRAM}`,
+            cost: stake, hitProb: pWin, ev, evPerDollar: ev / stake,
+            payoutLow: payoutIfWin, payoutHigh: payoutIfWin,
+            detail: `Model Win Prob ${(pWin * 100).toFixed(0)}% (${realWinPayoutRate !== null ? 'Live Pool Payout' : 'Odds-based Est. — Pools not loaded'})`
+          });
+        }
+      }
+
+      // --- PLACE on top model pick (only added when real place-pool data is available) ---
+      if (c1) {
+        let realPlacePayoutRate = getPlacePoolPayout(c1.PROGRAM);
+        if (realPlacePayoutRate !== null) {
+          let pPlace = placeProbabilityOf(c1.PROGRAM);
+          if (pPlace > 0) {
+            let conviction = Math.max(0, winProbs[c1.PROGRAM].zScore / MAX_Z_REF);
+            let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
+            let payoutIfPlace = stake * realPlacePayoutRate;
+            let ev = pPlace * payoutIfPlace - stake;
+            candidates.push({
+              type: 'PLACE', label: `$${stake} PLACE on #${c1.PROGRAM}`,
+              cost: stake, hitProb: pPlace, ev, evPerDollar: ev / stake,
+              payoutLow: payoutIfPlace, payoutHigh: payoutIfPlace,
+              detail: `Model Place Prob ${(pPlace * 100).toFixed(0)}% (Live Pool Payout, approx.)`
+            });
+          }
+        }
+      }
+
+      // --- SHOW on top model pick (only added when real show-pool data is available) ---
+      if (c1) {
+        let realShowPayoutRate = getShowPoolPayout(c1.PROGRAM);
+        if (realShowPayoutRate !== null) {
+          let pShow = showProbabilityOf(c1.PROGRAM);
+          if (pShow > 0) {
+            let conviction = Math.max(0, winProbs[c1.PROGRAM].zScore / MAX_Z_REF);
+            let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
+            let payoutIfShow = stake * realShowPayoutRate;
+            let ev = pShow * payoutIfShow - stake;
+            candidates.push({
+              type: 'SHOW', label: `$${stake} SHOW on #${c1.PROGRAM}`,
+              cost: stake, hitProb: pShow, ev, evPerDollar: ev / stake,
+              payoutLow: payoutIfShow, payoutHigh: payoutIfShow,
+              detail: `Model Show Prob ${(pShow * 100).toFixed(0)}% (Live Pool Payout, approx.)`
+            });
+          }
+        }
+      }
+
+      // --- Straight exacta: top 2 model picks, in that order ---
+      if (c1 && c2) {
+        let pOrder = exactaOrderProb(c1.PROGRAM, c2.PROGRAM);
+        let payout = exactaPayoutEstimate(c1.PROGRAM, c2.PROGRAM);
+        if (payout.value > 0 && pOrder > 0) {
+          let fairPayout = 1 / pOrder;
+          let edge = Math.max(0, (payout.value - fairPayout) / fairPayout);
+          let baseStake = Math.max(baseU, scaleStake(Math.min(edge, 1), 2, 6, baseU));
+          let cost = baseStake * 1;
+          let payoutIfHit = payout.value * baseStake;
+          let ev = pOrder * payoutIfHit - cost;
+          candidates.push({
+            type: 'EXACTA_STRAIGHT', label: `$${cost.toFixed(0)} Straight Exacta: #${c1.PROGRAM} / #${c2.PROGRAM}`,
+            cost, hitProb: pOrder, ev, evPerDollar: ev / cost,
+            payoutLow: payoutIfHit * 0.85, payoutHigh: payoutIfHit * 1.15,
+            detail: `${payout.isReal ? 'Live Probable' : 'Est.'} $${payout.value.toFixed(2)}/$1 base`
+          });
+        }
+      }
+
+      // --- 2-horse exacta box ---
+      if (c1 && c2) {
+        let pAB = exactaOrderProb(c1.PROGRAM, c2.PROGRAM);
+        let pBA = exactaOrderProb(c2.PROGRAM, c1.PROGRAM);
+        let payAB = exactaPayoutEstimate(c1.PROGRAM, c2.PROGRAM);
+        let payBA = exactaPayoutEstimate(c2.PROGRAM, c1.PROGRAM);
+        let pBox = pAB + pBA;
+        if (pBox > 0 && (payAB.value > 0 || payBA.value > 0)) {
+          let cost = baseU * 2;
+          let expectedPayout = (pAB * payAB.value + pBA * payBA.value) * baseU;
+          let ev = expectedPayout - cost;
+          let bothReal = payAB.isReal && payBA.isReal;
+          candidates.push({
+            type: 'EXACTA_BOX2', label: `$${cost.toFixed(0)} Exacta Box: #${c1.PROGRAM}, #${c2.PROGRAM}`,
+            cost, hitProb: pBox, ev, evPerDollar: ev / cost,
+            payoutLow: Math.min(payAB.value, payBA.value) * baseU * 0.85, payoutHigh: Math.max(payAB.value, payBA.value) * baseU * 1.15,
+            detail: `${bothReal ? 'Live Probables' : 'Partial/Est. Payouts'}, ${(pBox * 100).toFixed(0)}% modeled hit rate`
+          });
+        }
+      }
+
+      // --- 3-horse exacta box ---
+      if (c1 && c2 && c3) {
+        let progs = [c1.PROGRAM, c2.PROGRAM, c3.PROGRAM];
+        let combos = [];
+        for (let i = 0; i < 3; i++) {
+          for (let j = 0; j < 3; j++) {
+            if (i !== j) combos.push([progs[i], progs[j]]);
+          }
+        }
+        let cost = baseU * combos.length; // 6 combos
+        let pBox = 0, expectedPayout = 0, allReal = true;
+        combos.forEach(([a, b]) => {
+          let p = exactaOrderProb(a, b);
+          let pay = exactaPayoutEstimate(a, b);
+          if (!pay.isReal) allReal = false;
+          pBox += p;
+          expectedPayout += p * pay.value * baseU;
+        });
+        let ev = expectedPayout - cost;
+        candidates.push({
+          type: 'EXACTA_BOX3', label: `$${cost.toFixed(0)} 3-Horse Exacta Box: #${c1.PROGRAM}, #${c2.PROGRAM}, #${c3.PROGRAM}`,
+          cost, hitProb: pBox, ev, evPerDollar: ev / cost,
+          payoutLow: expectedPayout * 0.7, payoutHigh: expectedPayout * 1.3,
+          detail: `${allReal ? 'Live Probables' : 'Partial/Est. Payouts'}, ${(pBox * 100).toFixed(0)}% modeled hit rate (6 combos)`
+        });
+      }
+    }
+
+    let positiveEv = candidates.filter(c => c.ev > 0 && c.cost > 0);
+    let scenario = "", optionA = "", optionB = "";
+
+    if (positiveEv.length === 0) {
+      scenario = liveRunners.length < 2 ? "Insufficient Live Runners" : "No Positive-EV Wager Identified";
+      optionA = "$0 (PASS / NO BET — no candidate wager clears a positive expected value)";
+      optionB = "$0 (PASS / NO BET — field is efficiently priced or too unpredictable to gain an edge)";
+    } else {
+      let byEv = positiveEv.slice().sort((a, b) => b.evPerDollar - a.evPerDollar);
+      let best = byEv[0];
+      let byHitRate = positiveEv.slice().sort((a, b) => b.hitProb - a.hitProb).find(c => c.type !== best.type) || byEv[1];
+
+      scenario = `Value Pick: ${best.type.replace('_', ' ')} (EV/$ = +${(best.evPerDollar * 100).toFixed(0)}%)` +
+        (byHitRate ? ` | Safety Pick: ${byHitRate.type.replace('_', ' ')} (${(byHitRate.hitProb * 100).toFixed(0)}% modeled hit rate)` : '');
+
+      optionA = `${best.label} — Est. Payout $${best.payoutLow.toFixed(2)}–$${best.payoutHigh.toFixed(2)} (${best.detail})`;
+      optionB = byHitRate
+        ? `${byHitRate.label} — Est. Payout $${byHitRate.payoutLow.toFixed(2)}–$${byHitRate.payoutHigh.toFixed(2)} (${byHitRate.detail})`
+        : "$0 (PASS — no distinct second option cleared a positive EV)";
     }
 
     return {
       ruleAppliedMsg,
       leaderboard: runners,
       gaps: { gap12, gap23, gap34, gap45, gap13, gap14 },
-      wagerRecs: { scenario, optionA, optionB, optionC }
+      wagerRecs: { scenario, optionA, optionB, optionC: null },
+      wetnessTier,
+      trackConditionRaw: cachedTrackCondition
     };
   }
 
@@ -949,9 +1570,9 @@
     let top5 = leaderboard.slice(0, 5);
     if (!top5 || top5.length === 0) {
       return `
-        <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #f59e0b;">
-          <div style="color:#f59e0b;font-weight:bold;margin-bottom:6px;font-size:11px;">COMMENTS</div>
-          <div style="color:#9ca3af;font-size:10px;">Awaiting Runner Data...</div>
+        <div class="ts-panel">
+          <div class="ts-panel-title" style="color:var(--ts-orange);">Comments</div>
+          <div class="ts-muted">Awaiting Runner Data...</div>
         </div>
       `;
     }
@@ -962,18 +1583,18 @@
       let negStr = h.COMMENTS_NEG ? h.COMMENTS_NEG.replace(/^"|"$/g, '').trim() : '';
 
       return `
-        <div style="margin-bottom:6px;padding-bottom:6px;border-bottom:1px dashed #334155;">
-          <div style="color:#fbbf24;font-weight:bold;font-size:10px;margin-bottom:2px;">#${h.PROGRAM} ${nameStr}</div>
-          <div style="color:#34d399;font-size:9.5px;margin-bottom:1px;"><b>(+) Pos:</b> ${posStr || 'None'}</div>
-          <div style="color:#f87171;font-size:9.5px;"><b>(-) Neg:</b> ${negStr || 'None'}</div>
+        <div style="margin-bottom:6px;padding-bottom:6px;border-bottom:1px dashed var(--ts-border);">
+          <div style="color:var(--ts-yellow);font-weight:700;font-size:11.5px;margin-bottom:2px;">#${h.PROGRAM} ${nameStr}</div>
+          <div style="color:var(--ts-green);font-size:11px;margin-bottom:1px;"><b>(+) Pos:</b> ${posStr || 'None'}</div>
+          <div style="color:var(--ts-red);font-size:11px;"><b>(-) Neg:</b> ${negStr || 'None'}</div>
         </div>
       `;
     }).join('');
 
     return `
-      <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #f59e0b;">
-        <div style="color:#f59e0b;font-weight:bold;margin-bottom:6px;font-size:11px;">COMMENTS</div>
-        <div style="background:#0f172a;padding:8px;border-radius:4px;max-height:180px;overflow-y:auto;">
+      <div class="ts-panel">
+        <div class="ts-panel-title" style="color:var(--ts-orange);">Comments</div>
+        <div class="ts-code-block" style="max-height:180px;">
           ${contentHtml}
         </div>
       </div>
@@ -1004,15 +1625,15 @@
     let pipeString = `${dateStr}|${timeStr}|${trackName}|${raceNum}|${breed}|${p1}|${s1}|${p2}|${s2}|${p3}|${s3}`;
 
     return `
-      <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #a855f7;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-          <div style="color:#c084fc;font-weight:bold;font-size:11px;">🧪 TESTING EXPORT DATA (PIPE DELIMITED)</div>
-          <div style="color:#9ca3af;font-size:9px;">Excel / Text-to-Columns Ready</div>
+      <div class="ts-panel">
+        <div class="ts-row-flex" style="margin-bottom:6px;">
+          <div class="ts-panel-title" style="color:var(--ts-purple);margin-bottom:0;">🧪 Testing Export Data (Pipe Delimited)</div>
+          <div class="ts-muted" style="font-size:10px;">Excel / Text-to-Columns Ready</div>
         </div>
-        <div style="background:#0f172a;padding:8px;border-radius:4px;color:#f3e8ff;font-size:10px;word-break:break-all;user-select:all;border:1px solid #581c87;font-family:monospace;">
+        <div class="ts-code-block" style="color:var(--ts-fg);word-break:break-all;user-select:all;border:1px solid var(--ts-purple);">
           ${pipeString}
         </div>
-        <div style="color:#9ca3af;font-size:9px;margin-top:4px;font-style:italic;">
+        <div class="ts-muted ts-italic" style="font-size:10px;margin-top:4px;">
           Format: [Date]|[Post Time]|[Track]|[Race #]|[Breed]|[1st #]|[1st Score]|[2nd #]|[2nd Score]|[3rd #]|[3rd Score]
         </div>
       </div>
@@ -1024,8 +1645,11 @@
 
     let progress = getLoadingProgress();
     let isDataComplete = progress.percent === 100;
+    // Only start tracking the fingerprint once tabs report done — before that, of course things
+    // are still changing, so there's nothing meaningful to compare yet.
+    let fieldsStable = isDataComplete ? checkFieldStability() : false;
 
-    if (isDataComplete && !isCalculating && calcProgressPercent === 0) {
+    if (isDataComplete && fieldsStable && !isCalculating && calcProgressPercent === 0) {
       if (collectionTicker) {
         clearInterval(collectionTicker);
         collectionTicker = null;
@@ -1048,24 +1672,38 @@
     if (isCalculating) {
       let secondsLeft = Math.max(0, (16 - (calcProgressPercent * 0.16))).toFixed(1);
       return `
-        <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #3b82f6;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-            <div style="color:#60a5fa;font-weight:bold;font-size:11px;">⚙️ MODEL CALCULATIONS IN PROGRESS</div>
-            <div style="color:#93c5fd;font-weight:bold;font-size:10px;">${Math.round(calcProgressPercent)}%</div>
+        <div class="ts-panel">
+          <div class="ts-row-flex" style="margin-bottom:6px;">
+            <div style="color:var(--ts-cyan);font-weight:700;font-size:11.5px;">⚙️ Model Calculations In Progress</div>
+            <div style="color:var(--ts-cyan);font-weight:700;font-size:10.5px;">${Math.round(calcProgressPercent)}%</div>
           </div>
-          
-          <div style="color:#cbd5e1;font-size:10px;margin-bottom:12px;line-height:1.3;">
+
+          <div class="ts-muted" style="font-size:10.5px;margin-bottom:12px;">
             Please allow a moment for calculations...
           </div>
 
-          <div style="position:relative;margin-top:22px;background:#0f172a;border-radius:8px;padding:3px;border:1px solid #334155;">
+          <div style="position:relative;margin-top:22px;background:var(--ts-bg-code);border-radius:8px;padding:3px;border:1px solid var(--ts-border-soft);">
             <div style="position:absolute;top:-20px;left:${calcProgressPercent}%;transform:translateX(-50%) scaleX(-1);font-size:16px;line-height:1;pointer-events:none;transition:left 0.1s linear;">
               🏇
             </div>
-            <div style="width:${calcProgressPercent}%;background:linear-gradient(90deg, #3b82f6 0%, #8b5cf6 50%, #ec4899 100%);height:10px;border-radius:6px;transition:width 0.1s linear;"></div>
+            <div style="width:${calcProgressPercent}%;background:linear-gradient(90deg, var(--ts-purple) 0%, var(--ts-pink) 50%, var(--ts-cyan) 100%);height:10px;border-radius:6px;transition:width 0.1s linear;"></div>
           </div>
-          <div style="text-align:right;color:#9ca3af;font-size:9px;margin-top:4px;">
+          <div class="ts-muted" style="text-align:right;font-size:10px;margin-top:4px;">
             ${secondsLeft}s remaining
+          </div>
+        </div>
+      `;
+    }
+
+    if (isDataComplete && !fieldsStable) {
+      let secsIntoWindow = fieldStableSince ? (Date.now() - fieldStableSince) / 1000 : 0;
+      let secsRemaining = Math.max(0, (FIELD_STABILITY_WINDOW_MS / 1000) - secsIntoWindow).toFixed(1);
+      return `
+        <div class="ts-panel">
+          <div style="color:var(--ts-yellow);font-weight:700;font-size:11.5px;margin-bottom:6px;">🔄 Confirming Data Stability</div>
+          <div class="ts-muted" style="font-size:10.5px;">
+            All tabs loaded, but individual horse data is still arriving in the background.
+            Waiting for it to settle before finalizing (${secsRemaining}s)...
           </div>
         </div>
       `;
@@ -1076,25 +1714,25 @@
 
     let tabListHtml = REQUIRED_TABS.map(tab => {
       let isLoaded = loadedTabs[tab];
-      let color = isLoaded ? '#34d399' : '#f87171';
+      let color = isLoaded ? 'var(--ts-green)' : 'var(--ts-red)';
       let icon = isLoaded ? '🟢' : '🔴';
       let statusText = isLoaded ? 'LOADED' : (tab === 'Comments' ? `AWAITING DATA (${timeRemaining}s TIMEOUT)` : 'CLICK TAB ON PAGE');
       return `
-        <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:#0f172a;border-radius:4px;margin-bottom:4px;border:1px solid ${isLoaded ? '#059669' : '#991b1b'};">
-          <span style="color:#ffffff;font-weight:bold;font-size:10px;">${icon} ${tab}</span>
-          <span style="color:${color};font-weight:bold;font-size:9px;">${statusText}</span>
+        <div class="ts-row-flex" style="padding:5px 8px;background:var(--ts-bg-code);border-radius:6px;margin-bottom:4px;border:1px solid ${isLoaded ? 'var(--ts-green)' : 'var(--ts-red)'};">
+          <span style="font-weight:700;font-size:11px;">${icon} ${tab}</span>
+          <span style="color:${color};font-weight:700;font-size:10px;">${statusText}</span>
         </div>
       `;
     }).join('');
 
     return `
-      <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #ef4444;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-          <div style="color:#fbbf24;font-weight:bold;font-size:11px;">⏳ DATA COLLECTION STATUS</div>
-          <div style="color:#f87171;font-weight:bold;font-size:10px;">${progress.percent}% COMPLETE</div>
+      <div class="ts-panel">
+        <div class="ts-row-flex" style="margin-bottom:6px;">
+          <div style="color:var(--ts-yellow);font-weight:700;font-size:11.5px;">⏳ Data Collection Status</div>
+          <div style="color:var(--ts-red);font-weight:700;font-size:10.5px;">${progress.percent}% COMPLETE</div>
         </div>
-        
-        <div style="color:#cbd5e1;font-size:10px;margin-bottom:8px;line-height:1.3;">
+
+        <div class="ts-muted" style="font-size:10.5px;margin-bottom:8px;">
           Loading data... click each program tab to help me find data:
         </div>
 
@@ -1102,13 +1740,13 @@
           ${tabListHtml}
         </div>
 
-        <div style="position:relative;margin-top:22px;background:#0f172a;border-radius:8px;padding:3px;border:1px solid #334155;">
+        <div style="position:relative;margin-top:22px;background:var(--ts-bg-code);border-radius:8px;padding:3px;border:1px solid var(--ts-border-soft);">
           <div style="position:absolute;top:-20px;left:${progress.percent}%;transform:translateX(-50%) scaleX(-1);font-size:16px;line-height:1;pointer-events:none;transition:left 0.3s ease;">
             🏇
           </div>
-          <div style="width:${progress.percent}%;background:linear-gradient(90deg, #ef4444 0%, #f59e0b 50%, #10b981 100%);height:10px;border-radius:6px;transition:width 0.3s ease;"></div>
+          <div style="width:${progress.percent}%;background:linear-gradient(90deg, var(--ts-red) 0%, var(--ts-yellow) 50%, var(--ts-green) 100%);height:10px;border-radius:6px;transition:width 0.3s ease;"></div>
         </div>
-        <div style="text-align:right;color:#9ca3af;font-size:9px;margin-top:3px;">
+        <div class="ts-muted" style="text-align:right;font-size:10px;margin-top:3px;">
           ${progress.completed} of ${progress.total} Items Collected
         </div>
       </div>
@@ -1116,11 +1754,12 @@
   }
 
   function updateOverlay() {
+    applyOverlayThemeCSS();
     let existing = document.getElementById('ts-model-overlay');
     if (!existing) {
       existing = document.createElement('div');
       existing.id = 'ts-model-overlay';
-      existing.style.cssText = 'position:fixed;top:40px;right:20px;z-index:999999;background:#111827;color:#ffffff;padding:16px;border-radius:8px;box-shadow:0 10px 25px rgba(0,0,0,0.5);font-family:monospace;min-width:460px;max-width:620px;max-height:88vh;overflow-y:auto;border:2px solid #3b82f6;font-size:11px;transform-origin:top right;';
+      existing.style.cssText = 'position:fixed;top:40px;right:20px;z-index:999999;padding:16px;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.5);width:min(620px, 94vw);min-width:300px;max-height:88vh;overflow-y:auto;border:2px solid #bd93f9;transform-origin:top right;';
       document.body.appendChild(existing);
     }
 
@@ -1133,74 +1772,157 @@
 
     let modelRes = calculateModelOutput();
 
-    let leaderboardHtml = modelRes.leaderboard.map(h => {
+    let leaderboardRowsHtml = modelRes.leaderboard.map(h => {
       let nameStr = h.HORSE_NAME.replace(/"/g, '');
-      let pwrBonusStr = h.POWER_BONUS > 0 ? ` + Pwr: ${h.POWER_BONUS.toFixed(2)}` : '';
-      let scratchedTag = (h.IS_SCRATCHED || cachedScratchedMap[h.PROGRAM]) ? ' [SCRATCHED]' : '';
-      return `R${h.RANK} | #${h.PROGRAM} ${nameStr}${scratchedTag} | Final: ${h.FINAL_SCORE.toFixed(2)} = Base: ${h.BASE_SKILL.toFixed(2)} + Post: ${h.POST_BONUS.toFixed(2)} + Style: ${h.STYLE_BONUS.toFixed(2)}${pwrBonusStr}`;
-    }).join('\n');
+      let isScratched = h.IS_SCRATCHED || cachedScratchedMap[h.PROGRAM];
+      let pwrCellStyle = h.POWER_BONUS > 0 ? 'color:var(--ts-green);' : '';
+      let wetCellStyle = h.WET_BONUS > 0 ? 'color:var(--ts-green);' : '';
 
-    let gapHtml = modelRes.leaderboard.slice(0, 5).map((h, i, arr) => {
+      // Time-based persistence: a detected change stays highlighted for CHANGE_INDICATOR_DURATION_MS
+      // regardless of how often the page re-renders in between (previously the comparison baseline
+      // updated on every render, so an arrow only ever survived a single render cycle).
+      let now = Date.now();
+      if (!isLoaderVisible) {
+        let tracked = previousRankScoreMap[h.PROGRAM];
+        if (!tracked) {
+          previousRankScoreMap[h.PROGRAM] = { rank: h.RANK, score: h.FINAL_SCORE, rankChangedAt: null, rankDir: null, scoreChangedAt: null, scoreDir: null };
+        } else {
+          if (h.RANK !== tracked.rank) {
+            tracked.rankDir = h.RANK < tracked.rank ? 'up' : 'down';
+            tracked.rankChangedAt = now;
+            tracked.rank = h.RANK;
+          }
+          if (h.FINAL_SCORE !== tracked.score) {
+            tracked.scoreDir = h.FINAL_SCORE > tracked.score ? 'up' : 'down';
+            tracked.scoreChangedAt = now;
+            tracked.score = h.FINAL_SCORE;
+          }
+        }
+      }
+
+      let tracked = previousRankScoreMap[h.PROGRAM];
+      let rankArrow = '', rankStyle = '';
+      if (tracked && tracked.rankChangedAt && (now - tracked.rankChangedAt) < CHANGE_INDICATOR_DURATION_MS) {
+        rankArrow = tracked.rankDir === 'up' ? '▲' : '▼';
+        rankStyle = tracked.rankDir === 'up' ? 'color:var(--ts-green);font-weight:700;' : 'color:var(--ts-red);font-weight:700;';
+      }
+      let scoreArrow = '', scoreStyle = '';
+      if (tracked && tracked.scoreChangedAt && (now - tracked.scoreChangedAt) < CHANGE_INDICATOR_DURATION_MS) {
+        scoreArrow = tracked.scoreDir === 'up' ? '▲' : '▼';
+        scoreStyle = tracked.scoreDir === 'up' ? 'color:var(--ts-green);font-weight:700;' : 'color:var(--ts-red);font-weight:700;';
+      }
+
+      return `
+        <tr class="${isScratched ? 'ts-scratched' : ''}">
+          <td class="ts-num" style="${rankStyle}">${rankArrow}${h.RANK}</td>
+          <td class="ts-num">#${h.PROGRAM}</td>
+          <td class="ts-horse-cell"><span class="ts-horse-name">${nameStr}</span>${isScratched ? '<span class="ts-badge ts-badge-scratched">SCR</span>' : ''}</td>
+          <td class="ts-num" style="${scoreStyle}">${scoreArrow}${h.FINAL_SCORE.toFixed(2)}</td>
+          <td class="ts-num ts-muted">${h.BASE_SKILL.toFixed(2)}</td>
+          <td class="ts-num ts-muted">${h.POST_BONUS.toFixed(2)}</td>
+          <td class="ts-num ts-muted">${h.STYLE_BONUS.toFixed(2)}</td>
+          <td class="ts-num${pwrCellStyle ? '' : ' ts-muted'}" style="${pwrCellStyle}">${(h.POWER_BONUS || 0).toFixed(2)}</td>
+          <td class="ts-num${wetCellStyle ? '' : ' ts-muted'}" style="${wetCellStyle}">${(h.WET_BONUS || 0).toFixed(2)}</td>
+        </tr>`;
+    }).join('');
+
+    let leaderboardTableHtml = modelRes.leaderboard.length === 0
+      ? `<div class="ts-muted">Awaiting Field Calculation...</div>`
+      : `
+        <div class="ts-table-wrap">
+          <table class="ts-table ts-table-leaderboard">
+            <thead><tr>
+              <th>Rk</th><th>#</th><th>Horse</th><th>Final</th><th>Base</th><th>Post</th><th>Style</th><th>Bonus</th><th>Wet Bonus</th>
+            </tr></thead>
+            <tbody>${leaderboardRowsHtml}</tbody>
+          </table>
+        </div>
+      `;
+
+    let gapRowsHtml = modelRes.leaderboard.slice(0, 5).map((h, i, arr) => {
       let nameStr = h.HORSE_NAME.replace(/"/g, '');
-      let gapStr = i === 0 
-        ? "(Leader)" 
-        : `(Gap to Rank ${i}: -${(arr[i - 1].FINAL_SCORE - h.FINAL_SCORE).toFixed(2)})`;
-      return `  Rank ${i+1}: #${h.PROGRAM} ${nameStr} — Score: ${h.FINAL_SCORE.toFixed(2)} ${gapStr}`;
-    }).join('\n');
+      let gapStr = i === 0 ? '—' : `-${(arr[i - 1].FINAL_SCORE - h.FINAL_SCORE).toFixed(2)}`;
+      return `
+        <tr>
+          <td class="ts-num">${i + 1}</td>
+          <td class="ts-num">#${h.PROGRAM}</td>
+          <td class="ts-horse-cell">${nameStr}</td>
+          <td class="ts-num">${h.FINAL_SCORE.toFixed(2)}</td>
+          <td class="ts-num ts-muted">${gapStr}</td>
+        </tr>`;
+    }).join('');
+
+    let gapTableHtml = modelRes.leaderboard.length === 0
+      ? `<div class="ts-muted">N/A</div>`
+      : `
+        <div class="ts-table-wrap">
+          <table class="ts-table">
+            <thead><tr><th>Rk</th><th>#</th><th>Horse</th><th>Score</th><th>Gap</th></tr></thead>
+            <tbody>${gapRowsHtml}</tbody>
+          </table>
+        </div>
+      `;
 
     existing.innerHTML = `
-      <div style="border-bottom:2px solid #3b82f6;padding-bottom:8px;margin-bottom:12px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;color:#60a5fa;font-weight:bold;font-size:13px;">
+      <div style="border-bottom:2px solid var(--ts-border-accent);padding-bottom:8px;margin-bottom:12px;">
+        <div class="ts-row-flex" style="margin-bottom:8px;color:var(--ts-cyan);font-weight:700;font-size:14px;">
           <span>📍 ${trackDisplay} — RACE #${raceDisplay}${condTag}</span>
-          <span style="color:#9ca3af;font-size:11px;">📅 ${currentDate}</span>
+          <span class="ts-muted" style="font-size:11.5px;">📅 ${currentDate}</span>
         </div>
 
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-          <button id="ts-drag-handle" title="Click and drag to move panel" style="flex:1;background:#374151;color:#fbbf24;border:1px solid #4b5563;border-radius:4px;padding:4px 8px;cursor:move;font-weight:bold;font-size:11px;">✋ MOVE</button>
-          <button id="ts-refresh-btn" title="Clear Cache & Reset Race" style="flex:1;background:#2563eb;color:#ffffff;border:1px solid #3b82f6;border-radius:4px;padding:4px 8px;cursor:pointer;font-weight:bold;font-size:11px;">🔄 RESET</button>
-          <div style="flex:1.8;display:flex;align-items:center;gap:6px;background:#1f2937;padding:3px 8px;border-radius:4px;border:1px solid #374151;">
-            <span style="color:#9ca3af;font-size:10px;font-weight:bold;">ZOOM</span>
-            <input type="range" id="ts-zoom-slider" min="50" max="200" value="${Math.round(currentZoom * 100)}" style="width:100%;cursor:pointer;accent-color:#3b82f6;">
-            <span id="ts-zoom-label" style="color:#60a5fa;font-size:10px;font-weight:bold;min-width:34px;text-align:right;">${Math.round(currentZoom * 100)}%</span>
+          <button id="ts-drag-handle" title="Click and drag to move panel" class="ts-btn ts-btn-move" style="flex:1;">✋ MOVE</button>
+          <button id="ts-refresh-btn" title="Clear Cache & Reset Race" class="ts-btn ts-btn-reset" style="flex:1;">🔄 RESET</button>
+          <div style="flex:1.8;display:flex;align-items:center;gap:6px;background:var(--ts-bg-code);padding:4px 8px;border-radius:6px;border:1px solid var(--ts-border-soft);">
+            <span class="ts-muted" style="font-size:10.5px;font-weight:700;">ZOOM</span>
+            <input type="range" id="ts-zoom-slider" min="50" max="200" value="${Math.round(currentZoom * 100)}" style="width:100%;cursor:pointer;accent-color:var(--ts-purple);">
+            <span id="ts-zoom-label" style="color:var(--ts-cyan);font-size:10.5px;font-weight:700;min-width:36px;text-align:right;">${Math.round(currentZoom * 100)}%</span>
           </div>
         </div>
 
-        <div style="color:#9ca3af;font-size:11px;text-align:center;background:#1f2937;padding:4px;border-radius:4px;border:1px solid #374151;">
-          <span style="color:#34d399;font-weight:bold;">${activeStartersCount}</span> Active Starters &nbsp;|&nbsp; <span style="color:#f87171;font-weight:bold;">${scratchedHorsesCount}</span> Scratched
+        <div class="ts-status-pill">
+          <span style="color:var(--ts-green);font-weight:700;">${activeStartersCount}</span> Active Starters &nbsp;|&nbsp; <span style="color:var(--ts-red);font-weight:700;">${scratchedHorsesCount}</span> Scratched
         </div>
       </div>
 
       ${getLoaderSectionHtml()}
 
-      <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #475569;">
-        <div style="color:#f59e0b;font-weight:bold;margin-bottom:4px;font-size:11px;">Little John's Top Picks</div>
-        <div style="color:#a7f3d0;font-style:italic;margin-bottom:8px;">${modelRes.ruleAppliedMsg}</div>
+      ${isLoaderVisible ? `
+      <div class="ts-panel">
+        <div class="ts-panel-title">Little John's Top Picks</div>
+        <div class="ts-muted">⏳ Finalizing calculations — rankings, scores, and wager recommendations will appear once complete, so you're not betting on numbers that are still settling.</div>
+      </div>
+      ` : `
+      <div class="ts-panel">
+        <div class="ts-panel-title">Little John's Top Picks</div>
+        <div class="ts-italic ts-muted" style="margin-bottom:8px;">${modelRes.ruleAppliedMsg}</div>
 
-        <div style="color:#f32424;font-weight:bold;margin-bottom:2px;">--- RANKED LEADERBOARD ---</div>
-        <div style="background:#0f172a;padding:6px;border-radius:4px;white-space:pre-wrap;margin-bottom:8px;color:#e2e8f0;max-height:160px;overflow-y:auto;font-size:10px;">${leaderboardHtml || 'Awaiting Field Calculation...'}</div>
+        <div class="ts-section-label">Ranked Leaderboard</div>
+        ${leaderboardTableHtml}
 
-        <div style="color:#f32424;font-weight:bold;margin-bottom:2px;">--- TOP 5 DISTRIBUTION & GAPS ---</div>
-        <div style="background:#0f172a;padding:6px;border-radius:4px;white-space:pre-wrap;margin-bottom:8px;color:#cbd5e1;font-size:10px;">${gapHtml || 'N/A'}</div>
+        <div class="ts-section-label">Top 5 Distribution &amp; Gaps</div>
+        ${gapTableHtml}
 
-        <div style="color:#f59e0b;font-weight:bold;margin-bottom:2px;">--- WAGER RECOMMENDATIONS ---</div>
-        <div style="background:#0f172a;padding:6px;border-radius:4px;color:#38bdf8;font-size:10px;">
-          <b>Scenario:</b> ${modelRes.wagerRecs.scenario}<br/><br/>
-          <b>OPTION A (Primary Wager):</b><br/> ${modelRes.wagerRecs.optionA}<br/><br/>
-          <b>OPTION B (Secondary / Exotic):</b><br/> ${modelRes.wagerRecs.optionB}
-          ${modelRes.wagerRecs.optionC ? `<br/><br/><b>OPTION C (Churchill Special):</b><br/> ${modelRes.wagerRecs.optionC}` : ''}
+        <div class="ts-section-label">Wager Recommendations</div>
+        <div class="ts-code-block" style="color:var(--ts-cyan);">
+          <b style="color:var(--ts-fg);">Scenario:</b> ${modelRes.wagerRecs.scenario}<br/><br/>
+          <b style="color:var(--ts-fg);">Option A:</b><br/> ${modelRes.wagerRecs.optionA}<br/><br/>
+          <b style="color:var(--ts-fg);">Option B:</b><br/> ${modelRes.wagerRecs.optionB}
         </div>
       </div>
 
+      ${getTestingExportSectionHtml(modelRes)}
+      `}
+
       ${getCommentsSectionHtml(modelRes.leaderboard)}
 
-      ${getTestingExportSectionHtml(modelRes)}
-
-      <div style="background:#1f2937;padding:8px;border-radius:6px;border:1px dashed #4b5563;">
-        <div style="color:#9ca3af;font-weight:bold;margin-bottom:4px;font-size:10px;">AUDIT SECTION (RAW EXTRACTED CSVs)</div>
-        <div style="color:#f59e0b;font-weight:bold;margin-bottom:2px;">--- ALL HORSES CSV ---</div>
-        <div style="background:#111827;padding:4px;border-radius:4px;word-break:break-all;white-space:pre-wrap;margin-bottom:6px;color:#34d399;max-height:100px;overflow-y:auto;font-size:9px;">${getFormattedHorsesCsv()}</div>
-        <div style="color:#f59e0b;font-weight:bold;margin-bottom:2px;">--- RACE STATS ROWS ---</div>
-        <div style="background:#111827;padding:4px;border-radius:4px;word-break:break-all;white-space:pre-wrap;color:#60a5fa;font-size:9px;">${cachedStatsCsv}</div>
+      <div class="ts-panel" style="border-style:dashed;">
+        <div class="ts-muted" style="font-weight:700;margin-bottom:4px;font-size:11px;">AUDIT SECTION (RAW EXTRACTED CSVs)</div>
+        <div class="ts-section-label">All Horses CSV</div>
+        <div class="ts-code-block" style="color:var(--ts-green);word-break:break-all;white-space:pre-wrap;margin-bottom:6px;max-height:140px;font-size:10.5px;">${getFormattedHorsesCsv()}</div>
+        <div class="ts-section-label">Race Stats Rows</div>
+        <div class="ts-code-block" style="color:var(--ts-cyan);word-break:break-all;white-space:pre-wrap;margin-bottom:6px;font-size:10.5px;">${cachedStatsCsv}</div>
+        <div class="ts-code-block" style="color:var(--ts-orange);word-break:break-all;white-space:pre-wrap;font-size:10.5px;">${getRaceWidePoolsCsv()}</div>
       </div>
     `;
 
@@ -1261,6 +1983,28 @@
         cachedStatsCsv = `${statsHeader}\n${statRows.map(r => Object.values(r).join(',')).join('\n')}`;
         updateOverlay();
       }
+
+      let exoticsPayload = findExoticsPayload(data);
+      if (exoticsPayload) {
+        let parsed = parseExoticsGrid(exoticsPayload);
+        cachedExactaGrid = parsed.grid;
+        cachedExactaPoolTotal = parsed.poolTotal;
+        cachedExactaBaseUnit = parsed.baseUnit;
+        loadedTabs['Probables'] = true;
+        updateOverlay();
+      }
+
+      let poolsPayload = findPoolsPayload(data);
+      if (poolsPayload) {
+        let parsedPools = parsePoolsPayload(poolsPayload);
+        cachedPoolsMap = parsedPools.poolsMap;
+        cachedWinPoolTotal = parsedPools.winTotal;
+        cachedPlacePoolTotal = parsedPools.placeTotal;
+        cachedShowPoolTotal = parsedPools.showTotal;
+        cachedShowPoolAvailable = parsedPools.showAvailable;
+        loadedTabs['Pools'] = true;
+        updateOverlay();
+      }
     } catch(e) {}
   }
 
@@ -1287,6 +2031,7 @@
 
   startCollectionTicker();
   applyLeftAlignmentCSS();
+  applyOverlayThemeCSS();
   updateOverlay();
   console.log("Live Handicapping Model V25 Running - Scratched horses zeroed post-calculation!");
 })();
