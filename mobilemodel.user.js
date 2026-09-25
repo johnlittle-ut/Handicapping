@@ -1,4 +1,5 @@
 // ==UserScript==
+// ==UserScript==
 // @name         TwinSpires Mobile Handicapper
 // @namespace    http://tampermonkey.net/
 // @version      1.2
@@ -20,6 +21,21 @@
 
   // Loader, Tab & Calculation Tracking State
   const REQUIRED_TABS = ['Summary', 'Advanced', 'Speed', 'Class', 'Pace', 'Comments', 'Pools', 'Probables'];
+
+  // The numeric fields that feed the base score (used both for mean-imputing missing values in
+  // calculateModelOutput, and for the data-stability fingerprint below — same list, since the
+  // instability bug this fixes is specifically caused by these fields still trickling in after the
+  // tab-click-based "loaded" signal fires).
+  const SCORING_NUM_FIELDS = ['PRM_PWR', 'AVG_SPD', 'BACK_SPD', 'SPD_LR', 'AVG_CLS', 'LAST_CLS', 'AVG_DIST_SPD', 'BEST_SPD', 'W_JKY', 'W_TRN', 'E1', 'E2', 'LP', 'DAYS_OFF'];
+
+  // ===== TEMPORARY BACKTESTING FEATURE =====
+  // Runs the model twice per race (Thoroughbred/default weights AND Special weights, regardless
+  // of which set the track would normally auto-select) and shows both leaderboards side by side,
+  // so results can be compared against actual finishes at ANY track — not just the ones already on
+  // SPECIAL_WEIGHT_TRACKS — to decide whether Special weights should be extended there. Off by
+  // default; toggled on/off via the switch in the status row. Delete this block, its toggle UI/
+  // event listener, and its one usage below to remove the feature entirely once backtesting is done.
+  let dualWeightTestMode = false;
   let loadedTabs = {
     'Summary': false,
     'Advanced': false,
@@ -31,12 +47,199 @@
     'Probables': false
   };
 
+  // Dracula-themed stylesheet for the overlay. Scoped entirely under #ts-model-overlay so it can
+  // never leak into TwinSpires' own page styles. Classes replace what used to be large repeated
+  // inline style="" blocks throughout every render function, and give the tables below a single
+  // consistent, mobile-safe look instead of hand-tuned pixel values scattered everywhere.
+  function applyOverlayThemeCSS() {
+    if (document.getElementById('ts-dracula-theme')) return;
+    const style = document.createElement('style');
+    style.id = 'ts-dracula-theme';
+    style.textContent = `
+      #ts-model-overlay {
+        --ts-bg: #282a36;
+        --ts-bg-panel: #21222c;
+        --ts-bg-code: #191a21;
+        --ts-border: #44475a;
+        --ts-border-soft: #383a4a;
+        --ts-border-accent: #6272a4;
+        --ts-fg: #f8f8f2;
+        --ts-fg-muted: #8892b0;
+        --ts-purple: #bd93f9;
+        --ts-cyan: #8be9fd;
+        --ts-green: #50fa7b;
+        --ts-red: #ff5555;
+        --ts-yellow: #f1fa8c;
+        --ts-orange: #ffb86c;
+        --ts-pink: #ff79c6;
+        --ts-font-mono: 'Cascadia Code','Fira Code','JetBrains Mono',ui-monospace,SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;
+        --ts-font-ui: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+
+        background: var(--ts-bg);
+        color: var(--ts-fg);
+        font-family: var(--ts-font-ui);
+        font-size: 13px;
+        line-height: 1.45;
+        -webkit-font-smoothing: antialiased;
+      }
+      #ts-model-overlay * { box-sizing: border-box; }
+
+      #ts-model-overlay .ts-panel {
+        background: var(--ts-bg-panel);
+        padding: 10px 12px;
+        border-radius: 8px;
+        margin-bottom: 12px;
+        border: 1px solid var(--ts-border-accent);
+      }
+      #ts-model-overlay .ts-panel-title {
+        color: var(--ts-orange);
+        font-weight: 700;
+        margin-bottom: 6px;
+        font-size: 12.5px;
+        letter-spacing: 0.2px;
+      }
+      #ts-model-overlay .ts-section-label {
+        color: var(--ts-pink);
+        font-weight: 700;
+        margin: 10px 0 5px;
+        font-size: 11.5px;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+      }
+      #ts-model-overlay .ts-section-label:first-child { margin-top: 0; }
+      #ts-model-overlay .ts-muted { color: var(--ts-fg-muted); }
+      #ts-model-overlay .ts-italic { font-style: italic; }
+      #ts-model-overlay .ts-code-block {
+        background: var(--ts-bg-code);
+        padding: 7px 9px;
+        border-radius: 6px;
+        font-family: var(--ts-font-mono);
+        font-size: 11.5px;
+        color: var(--ts-fg);
+        overflow-y: auto;
+      }
+      #ts-model-overlay .ts-row-flex {
+        display: flex; align-items: center; justify-content: space-between;
+      }
+      #ts-model-overlay .ts-btn {
+        background: var(--ts-bg-code);
+        border: 1px solid var(--ts-border-accent);
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-weight: 700;
+        font-size: 11.5px;
+        font-family: var(--ts-font-ui);
+        cursor: pointer;
+        color: var(--ts-fg);
+      }
+      #ts-model-overlay .ts-btn-move { color: var(--ts-yellow); cursor: move; }
+      #ts-model-overlay .ts-btn-reset { background: var(--ts-purple); color: #282a36; border-color: var(--ts-purple); }
+      #ts-model-overlay .ts-status-pill {
+        color: var(--ts-fg-muted);
+        font-size: 11.5px;
+        text-align: center;
+        background: var(--ts-bg-code);
+        padding: 5px;
+        border-radius: 6px;
+        border: 1px solid var(--ts-border-soft);
+      }
+      #ts-model-overlay .ts-toggle-row {
+        display: flex; align-items: center; gap: 6px;
+        font-size: 10px; color: var(--ts-fg-muted); font-weight: 700; white-space: nowrap;
+      }
+      #ts-model-overlay .ts-toggle-switch {
+        position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0;
+      }
+      #ts-model-overlay .ts-toggle-switch input { opacity: 0; width: 0; height: 0; }
+      #ts-model-overlay .ts-toggle-slider {
+        position: absolute; cursor: pointer; inset: 0;
+        background: var(--ts-border-soft); border-radius: 18px; transition: background 0.15s ease;
+      }
+      #ts-model-overlay .ts-toggle-slider::before {
+        content: ""; position: absolute; height: 14px; width: 14px; left: 2px; bottom: 2px;
+        background: var(--ts-fg); border-radius: 50%; transition: transform 0.15s ease;
+      }
+      #ts-model-overlay .ts-toggle-switch input:checked + .ts-toggle-slider { background: var(--ts-yellow); }
+      #ts-model-overlay .ts-toggle-switch input:checked + .ts-toggle-slider::before { transform: translateX(14px); background: #282a36; }
+      #ts-model-overlay .ts-badge {
+        font-size: 9.5px;
+        font-weight: 700;
+        border-radius: 4px;
+        padding: 1px 5px;
+        margin-left: 5px;
+        white-space: nowrap;
+      }
+      #ts-model-overlay .ts-badge-scratched { color: var(--ts-red); border: 1px solid var(--ts-red); }
+
+      /* Tables (leaderboard, gaps, wet bonus) */
+      #ts-model-overlay .ts-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      #ts-model-overlay .ts-table { width: 100%; border-collapse: collapse; font-family: var(--ts-font-mono); font-size: 12px; }
+      #ts-model-overlay .ts-table th {
+        text-align: left; color: var(--ts-purple); font-weight: 700;
+        padding: 5px 7px; border-bottom: 1px solid var(--ts-border); white-space: nowrap;
+      }
+      #ts-model-overlay .ts-table td { padding: 5px 7px; border-bottom: 1px solid var(--ts-border-soft); vertical-align: top; color: var(--ts-fg); }
+      #ts-model-overlay .ts-table tbody tr:nth-child(even) { background: rgba(248,248,242,0.03); }
+      #ts-model-overlay .ts-table .ts-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      #ts-model-overlay .ts-table .ts-horse-cell { white-space: normal; min-width: 130px; }
+      #ts-model-overlay .ts-table tr.ts-scratched td { opacity: 0.55; }
+      #ts-model-overlay .ts-table tr.ts-scratched .ts-horse-name { text-decoration: line-through; color: var(--ts-red); }
+      /* Tables with many/wide columns (the 9-column leaderboard, the 6-column wager table with
+         headers like "Hit Rate (%)") need more room than the container's own width to avoid
+         cramping/smushed text — let them exceed 100% and scroll horizontally via .ts-table-wrap
+         rather than force-squeezing every column. */
+      #ts-model-overlay .ts-table-scroll { width: auto; min-width: 100%; }
+
+      /* Readable at small sizes on mobile */
+      @media (max-width: 480px) {
+        #ts-model-overlay { font-size: 13.5px; }
+        #ts-model-overlay .ts-table { font-size: 12.5px; }
+        #ts-model-overlay .ts-table th, #ts-model-overlay .ts-table td { padding: 6px 5px; }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
   let isLoaderVisible = true;
   let isCalculating = false;
   let calcProgressPercent = 0;
   let calcInterval = null;
   let collectionStartTime = Date.now();
   let collectionTicker = null;
+
+  // Tracks each horse's rank/score from the last LIVE (post-finalization) render, so rank/score
+  // movements can be shown as they happen instead of a static top-pick highlight. Only updated
+  // once finalized — see updateOverlay() — so the first visible render starts neutral rather than
+  // comparing against pre-finalization data that was still settling.
+  let previousRankScoreMap = {};
+  const CHANGE_INDICATOR_DURATION_MS = 20000; // how long a change stays highlighted, independent of render frequency
+
+  // Data-stability tracking. Tab-click detection only proves a tab's fetch was triggered, not that
+  // its data has actually finished arriving and merging — TwinSpires keeps sending per-horse field
+  // updates in the background after that. Fingerprinting the actual scoring fields and requiring
+  // them to hold steady for a few seconds catches that, instead of trusting tab clicks alone.
+  let lastFieldFingerprint = null;
+  let fieldStableSince = null;
+  const FIELD_STABILITY_WINDOW_MS = 6000;
+
+  function computeFieldFingerprint() {
+    let liveHorses = Object.values(cachedHorsesMap)
+      .filter(h => !h.IS_SCRATCHED && !cachedScratchedMap[h.PROGRAM])
+      .sort((a, b) => String(a.PROGRAM).localeCompare(String(b.PROGRAM), undefined, { numeric: true }));
+    return liveHorses.map(h => SCORING_NUM_FIELDS.map(f => h[f]).join(',')).join('|');
+  }
+
+  // Updates the fingerprint/timer as a side effect, then reports whether the data has been
+  // unchanged for at least FIELD_STABILITY_WINDOW_MS. Call once per render pass.
+  function checkFieldStability() {
+    let fp = computeFieldFingerprint();
+    if (fp !== lastFieldFingerprint) {
+      lastFieldFingerprint = fp;
+      fieldStableSince = Date.now();
+      return false;
+    }
+    return fieldStableSince !== null && (Date.now() - fieldStableSince) >= FIELD_STABILITY_WINDOW_MS;
+  }
 
   function getLoadingProgress() {
     let hasComments = Object.values(cachedHorsesMap).some(h => 
@@ -70,7 +273,7 @@
     if (!outline) {
       outline = document.createElement('div');
       outline.id = 'ts-zoom-outline';
-      outline.style.cssText = 'position:fixed;z-index:1000000;border:2px dashed #60a5fa;background:rgba(59,130,246,0.18);pointer-events:none;border-radius:8px;box-shadow:0 0 15px rgba(96,165,250,0.4);transition:none;';
+      outline.style.cssText = 'position:fixed;z-index:1000000;border:2px dashed #bd93f9;background:rgba(189,147,249,0.15);pointer-events:none;border-radius:8px;box-shadow:0 0 15px rgba(189,147,249,0.4);transition:none;';
       document.body.appendChild(outline);
     }
 
@@ -81,7 +284,7 @@
     let previewH = overlay.offsetHeight * previewZoom;
 
     outline.style.top = `${rect.top}px`;
-    outline.style.left = `${rect.left}px`;
+    outline.style.left = `${rect.right - previewW}px`;
     outline.style.width = `${previewW}px`;
     outline.style.height = `${previewH}px`;
     outline.style.display = 'block';
@@ -89,7 +292,9 @@
 
   function removeZoomPreview() {
     let outline = document.getElementById('ts-zoom-outline');
-    if (outline) outline.style.display = 'none';
+    if (outline) {
+      outline.style.display = 'none';
+    }
   }
 
   function applyZoom() {
@@ -105,149 +310,6 @@
       }
     }
     removeZoomPreview();
-  }
-
-  function resetRaceData() {
-    cachedHorsesMap = {};
-    cachedScratchedMap = {};
-    cachedStatsObj = null;
-    cachedStatsCsv = "Awaiting Race Stats Data...";
-    cachedTrackCondition = "";
-    cachedPostTime = "N/A";
-    REQUIRED_TABS.forEach(tab => loadedTabs[tab] = false);
-    
-    isLoaderVisible = true;
-    isCalculating = false;
-    calcProgressPercent = 0;
-    collectionStartTime = Date.now();
-
-    if (calcInterval) {
-      clearInterval(calcInterval);
-      calcInterval = null;
-    }
-    if (collectionTicker) {
-      clearInterval(collectionTicker);
-      collectionTicker = null;
-    }
-    
-    startCollectionTicker();
-  }
-
-  function startCollectionTicker() {
-    if (collectionTicker) clearInterval(collectionTicker);
-    collectionTicker = setInterval(() => {
-      if (isLoaderVisible && !isCalculating) {
-        updateOverlay();
-      } else {
-        clearInterval(collectionTicker);
-        collectionTicker = null;
-      }
-    }, 1000);
-  }
-
-  function handleDragStart(clientX, clientY) {
-    let overlay = document.getElementById('ts-model-overlay');
-    if (!overlay) return;
-    isDragging = true;
-    let rect = overlay.getBoundingClientRect();
-    dragOffsetX = clientX - rect.left;
-    dragOffsetY = clientY - rect.top;
-  }
-
-  function handleDragMove(clientX, clientY) {
-    if (!isDragging) return;
-    let overlay = document.getElementById('ts-model-overlay');
-    if (!overlay) return;
-
-    let newLeft = clientX - dragOffsetX;
-    let newTop = clientY - dragOffsetY;
-
-    overlay.style.right = 'auto';
-    overlay.style.left = `${newLeft}px`;
-    overlay.style.top = `${newTop}px`;
-  }
-
-  if (!window.__tsEventListenerAttached) {
-    document.addEventListener('input', function(e) {
-      if (e.target && e.target.id === 'ts-zoom-slider') {
-        let previewVal = parseFloat(e.target.value) / 100.0;
-        updateZoomPreview(previewVal);
-      }
-    });
-
-    function commitZoom(e) {
-      if (e.target && e.target.id === 'ts-zoom-slider') {
-        let slider = document.getElementById('ts-zoom-slider');
-        if (slider) {
-          currentZoom = parseFloat(slider.value) / 100.0;
-          applyZoom();
-        }
-      }
-    }
-
-    document.addEventListener('change', commitZoom);
-    document.addEventListener('mouseup', commitZoom);
-    document.addEventListener('touchend', commitZoom);
-
-    document.addEventListener('click', function(e) {
-      if (!e.target) return;
-
-      let clickedText = (e.target.innerText || e.target.textContent || '').trim();
-      REQUIRED_TABS.forEach(tab => {
-        if (tab !== 'Comments' && (clickedText.toLowerCase() === tab.toLowerCase() || clickedText.toLowerCase().includes(tab.toLowerCase()))) {
-          loadedTabs[tab] = true;
-          setTimeout(updateOverlay, 100);
-        }
-      });
-
-      if (e.target.id === 'ts-refresh-btn') {
-        let urlData = parseTwinSpiresUrl();
-        if (urlData) {
-          cachedTrackName = urlData.trackName;
-          cachedRaceNum = urlData.raceNum;
-        }
-        resetRaceData();
-        updateOverlay();
-      }
-    });
-
-    document.addEventListener('mousedown', function(e) {
-      if (!e.target) return;
-      if (e.target.id === 'ts-drag-handle' || e.target.closest('#ts-drag-handle')) {
-        handleDragStart(e.clientX, e.clientY);
-        e.preventDefault();
-      }
-    });
-
-    document.addEventListener('mousemove', function(e) {
-      handleDragMove(e.clientX, e.clientY);
-    });
-
-    document.addEventListener('mouseup', function() {
-      isDragging = false;
-    });
-
-    document.addEventListener('touchstart', function(e) {
-      if (!e.target) return;
-      if (e.target.id === 'ts-drag-handle' || e.target.closest('#ts-drag-handle')) {
-        let touch = e.touches[0];
-        handleDragStart(touch.clientX, touch.clientY);
-      }
-    }, { passive: false });
-
-    document.addEventListener('touchmove', function(e) {
-      if (isDragging) {
-        let touch = e.touches[0];
-        handleDragMove(touch.clientX, touch.clientY);
-        e.preventDefault();
-      }
-    }, { passive: false });
-
-    document.addEventListener('touchend', function() {
-      isDragging = false;
-    });
-
-    window.__tsEventListenerAttached = true;
   }
 
   function injectToggleStyles() {
@@ -270,12 +332,12 @@
         min-height: 60px !important;
         max-height: 60px !important;
         border-radius: 50% !important;
-        border: 3px solid #64748b !important;
+        border: 3px solid #6272a4 !important;
         padding: 0 !important;
         margin: 0 !important;
         overflow: hidden !important;
         cursor: pointer !important;
-        background-color: #0f172a !important;
+        background-color: #191a21 !important;
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
@@ -309,7 +371,7 @@
       }
 
       button#ts-toggle-btn.ts-toggle-btn.active {
-        border-color: #3b82f6 !important;
+        border-color: #bd93f9 !important;
         opacity: 1.0 !important;
       }
     `;
@@ -324,11 +386,11 @@
       btn.id = 'ts-toggle-btn';
       btn.type = 'button';
       btn.className = `ts-toggle-btn ${isOverlayVisible ? 'active' : ''}`;
-      
+
       const toggleImg = document.createElement('img');
       toggleImg.src = HORSE_IMAGE_URL;
       toggleImg.alt = 'Toggle Model';
-      
+
       btn.appendChild(toggleImg);
 
       btn.addEventListener('click', function(e) {
@@ -344,6 +406,176 @@
 
       document.body.appendChild(btn);
     }
+  }
+
+  function resetRaceData() {
+    cachedHorsesMap = {};
+    cachedScratchedMap = {};
+    cachedStatsObj = null;
+    cachedStatsCsv = "Awaiting Race Stats Data...";
+    cachedTrackCondition = "";
+    cachedPostTime = "N/A";
+    cachedExactaGrid = {};
+    cachedExactaPoolTotal = 0;
+    cachedExactaBaseUnit = 1;
+    cachedPoolsMap = {};
+    cachedWinPoolTotal = 0;
+    cachedPlacePoolTotal = 0;
+    cachedShowPoolTotal = 0;
+    cachedShowPoolAvailable = false;
+    cachedPoolsWasPercentMode = false;
+    REQUIRED_TABS.forEach(tab => loadedTabs[tab] = false);
+    previousRankScoreMap = {};
+    lastFieldFingerprint = null;
+    fieldStableSince = null;
+    
+    isLoaderVisible = true;
+    isCalculating = false;
+    calcProgressPercent = 0;
+    collectionStartTime = Date.now();
+
+    if (calcInterval) {
+      clearInterval(calcInterval);
+      calcInterval = null;
+    }
+    if (collectionTicker) {
+      clearInterval(collectionTicker);
+      collectionTicker = null;
+    }
+    
+    startCollectionTicker();
+  }
+
+  function startCollectionTicker() {
+    if (collectionTicker) clearInterval(collectionTicker);
+    collectionTicker = setInterval(() => {
+      if (isLoaderVisible && !isCalculating) {
+        updateOverlay();
+      } else {
+        clearInterval(collectionTicker);
+        collectionTicker = null;
+      }
+    }, 1000);
+  }
+
+  if (!window.__tsEventListenerAttached) {
+    document.addEventListener('input', function(e) {
+      if (e.target && e.target.id === 'ts-zoom-slider') {
+        let previewVal = parseFloat(e.target.value) / 100.0;
+        updateZoomPreview(previewVal);
+      }
+    });
+
+    function commitZoom(e) {
+      if (e.target && e.target.id === 'ts-zoom-slider') {
+        let slider = document.getElementById('ts-zoom-slider');
+        if (slider) {
+          currentZoom = parseFloat(slider.value) / 100.0;
+          applyZoom();
+        }
+      }
+    }
+
+    document.addEventListener('change', commitZoom);
+    document.addEventListener('mouseup', commitZoom);
+    document.addEventListener('touchend', commitZoom);
+
+    document.addEventListener('change', function(e) {
+      if (e.target && e.target.id === 'ts-weight-compare-toggle') {
+        dualWeightTestMode = e.target.checked;
+        updateOverlay();
+      }
+    });
+
+    document.addEventListener('click', function(e) {
+      if (!e.target) return;
+
+      let clickedText = (e.target.innerText || e.target.textContent || '').trim();
+      REQUIRED_TABS.forEach(tab => {
+        if (tab !== 'Comments' && (clickedText.toLowerCase() === tab.toLowerCase() || clickedText.toLowerCase().includes(tab.toLowerCase()))) {
+          loadedTabs[tab] = true;
+          setTimeout(updateOverlay, 100);
+        }
+      });
+
+      if (e.target.id === 'ts-refresh-btn') {
+        let urlData = parseTwinSpiresUrl();
+        if (urlData) {
+          cachedTrackName = urlData.trackName;
+          cachedRaceNum = urlData.raceNum;
+        }
+        resetRaceData();
+        updateOverlay();
+      }
+    });
+
+    document.addEventListener('mousedown', function(e) {
+      if (!e.target) return;
+      if (e.target.id === 'ts-drag-handle' || e.target.closest('#ts-drag-handle')) {
+        let overlay = document.getElementById('ts-model-overlay');
+        if (!overlay) return;
+        isDragging = true;
+        let rect = overlay.getBoundingClientRect();
+        dragOffsetX = e.clientX - rect.left;
+        dragOffsetY = e.clientY - rect.top;
+        e.preventDefault();
+      }
+    });
+
+    document.addEventListener('mousemove', function(e) {
+      if (!isDragging) return;
+      let overlay = document.getElementById('ts-model-overlay');
+      if (!overlay) return;
+
+      let newLeft = e.clientX - dragOffsetX;
+      let newTop = e.clientY - dragOffsetY;
+
+      overlay.style.right = 'auto';
+      overlay.style.left = `${newLeft}px`;
+      overlay.style.top = `${newTop}px`;
+      overlay.style.transformOrigin = 'top left';
+    });
+
+    document.addEventListener('mouseup', function() {
+      isDragging = false;
+    });
+
+    // Touch equivalents of the drag handlers above — essential on mobile, where drag interactions
+    // happen via touch, not mouse events. Desktop's codebase has no touch handling at all.
+    document.addEventListener('touchstart', function(e) {
+      if (!e.target) return;
+      if (e.target.id === 'ts-drag-handle' || e.target.closest('#ts-drag-handle')) {
+        let overlay = document.getElementById('ts-model-overlay');
+        if (!overlay) return;
+        let touch = e.touches[0];
+        isDragging = true;
+        let rect = overlay.getBoundingClientRect();
+        dragOffsetX = touch.clientX - rect.left;
+        dragOffsetY = touch.clientY - rect.top;
+      }
+    }, { passive: false });
+
+    document.addEventListener('touchmove', function(e) {
+      if (!isDragging) return;
+      let overlay = document.getElementById('ts-model-overlay');
+      if (!overlay) return;
+      let touch = e.touches[0];
+
+      let newLeft = touch.clientX - dragOffsetX;
+      let newTop = touch.clientY - dragOffsetY;
+
+      overlay.style.right = 'auto';
+      overlay.style.left = `${newLeft}px`;
+      overlay.style.top = `${newTop}px`;
+      overlay.style.transformOrigin = 'top left';
+      e.preventDefault();
+    }, { passive: false });
+
+    document.addEventListener('touchend', function() {
+      isDragging = false;
+    });
+
+    window.__tsEventListenerAttached = true;
   }
 
   function parseTwinSpiresUrl(url = window.location.href) {
@@ -369,6 +601,15 @@
   let cachedScratchedMap = {};
   let cachedStatsObj = null;
   let cachedStatsCsv = "Awaiting Race Stats Data...";
+  let cachedExactaGrid = {};      // cachedExactaGrid[fromProgram][toProgram] = real $-per-base-unit payout, or null if scratched/invalid
+  let cachedExactaPoolTotal = 0;
+  let cachedExactaBaseUnit = 1;   // the track's minimum exacta base bet, read from the payload (usually $1)
+  let cachedPoolsMap = {};        // cachedPoolsMap[program] = { win, place, show } — real $ amounts wagered per horse (pool share), per $1 base
+  let cachedWinPoolTotal = 0;
+  let cachedPlacePoolTotal = 0;
+  let cachedShowPoolTotal = 0;
+  let cachedShowPoolAvailable = false;
+  let cachedPoolsWasPercentMode = false; // true when the last Pools payload was auto-detected and converted from % display mode
 
   const ROUTE_IGNORE_LIST = [
     'bet', 'bets', 'betting', 'race', 'races', 'handicapping', 
@@ -377,11 +618,31 @@
     'pools', 'probables'
   ];
 
-  function isHeavyWetTrack(condVal) {
-    if (!condVal) return false;
+  // Shared takeout assumption used to convert pool-distribution $ amounts into real payouts,
+  // and as the fallback exacta payout estimator's discount. Validated against a real UK Haydock
+  // WIN pool (~18% reproduced the track's displayed odds almost exactly).
+  const TAKEOUT_RATE = 0.18;
+
+  // A bet must promise at least this much back per dollar risked (net of the stake itself) to be
+  // worth recommending at all — regardless of EV. A heavy favorite to place/show can be technically
+  // EV-positive while still only returning a few cents of profit per dollar, which isn't worth a
+  // wager slot even at low risk. 1.5 = payout must be >= 1.5x the stake, i.e. at least 50% profit.
+  const MIN_PAYOUT_RATIO = 1.5;
+
+  // Returns wetness tier: 0 = dry/fast/firm, 1 = off/yielding (moderately wet), 2 = sloppy/muddy/heavy (fully wet)
+  function getWetnessTier(condVal) {
+    if (!condVal) return 0;
     let c = String(condVal).toUpperCase().trim();
-    const wetKeywords = ['MUDDY', 'SLOPPY', 'HEAVY', 'YIELDING', 'SOFT', 'WET', 'MY', 'SY', 'HY', 'YL', 'SF', 'WF'];
-    return wetKeywords.some(k => c === k || c.includes(k));
+    const tier2Keywords = ['MUDDY', 'SLOPPY', 'HEAVY', 'WET', 'MY', 'SY', 'HY', 'WF'];
+    const tier1Keywords = ['YIELDING', 'SOFT', 'YL', 'SF'];
+    if (tier2Keywords.some(k => c === k || c.includes(k))) return 2;
+    if (tier1Keywords.some(k => c === k || c.includes(k))) return 1;
+    return 0;
+  }
+
+  // Kept for the one existing dry/wet-only reference (power bonus messaging); tier 1 or 2 both count as "wet"
+  function isHeavyWetTrack(condVal) {
+    return getWetnessTier(condVal) > 0;
   }
 
   function getActiveTrackName(payloadObj) {
@@ -464,8 +725,8 @@
     if (!obj) return defaultVal;
     let keyList = Array.isArray(keys) ? keys : [keys];
     for (let k of keyList) {
-      if (obj[k] !== undefined && obj[k] !== null) {
-        let val = obj[k];
+      let val = obj[k];
+      if (val !== undefined && val !== null && typeof val !== 'object') {
         if (typeof val === 'number') return val;
         let cleaned = String(val).replace('%', '').trim();
         let parsed = parseFloat(cleaned);
@@ -479,8 +740,28 @@
     if (!obj) return defaultVal;
     let keyList = Array.isArray(keys) ? keys : [keys];
     for (let k of keyList) {
-      if (obj[k] !== undefined && obj[k] !== null) {
-        return String(obj[k]).trim();
+      let val = obj[k];
+      if (val === undefined || val === null) continue;
+
+      // Some fields (e.g. commentsPositive/commentsNegative) legitimately arrive as an ARRAY of
+      // strings rather than one flat string — join them into a readable single string. An empty
+      // array (a horse with no negative comments, say) correctly falls through to the next
+      // candidate key / the default, rather than being treated as present-but-blank.
+      if (Array.isArray(val)) {
+        let joined = val
+          .filter(v => v !== null && v !== undefined && String(v).trim() !== '')
+          .map(v => String(v).trim())
+          .join('; ');
+        if (joined !== '') return joined;
+        continue;
+      }
+
+      // Guard against object-typed payload fields (e.g. a structured {numerator, denominator}
+      // odds object on some responses instead of a flat "7/5" string) — String() on a plain
+      // object produces the literal text "[object Object]", which would otherwise silently
+      // overwrite a perfectly good previously-merged value. Skip and try the next candidate key.
+      if (typeof val !== 'object') {
+        return String(val).trim();
       }
     }
     return defaultVal;
@@ -540,6 +821,197 @@
     return null;
   }
 
+  // Finds the Exotics probables payload (e.g. the Exacta probable-payout grid from the Probables tab)
+  function findExoticsPayload(obj, depth = 0) {
+    if (!obj || typeof obj !== 'object' || depth > 5) return null;
+    if (obj.Exotics && Array.isArray(obj.Exotics.RunList)) return obj;
+    if (Array.isArray(obj)) {
+      for (let item of obj) {
+        let found = findExoticsPayload(item, depth + 1);
+        if (found) return found;
+      }
+    } else {
+      for (let key in obj) {
+        if (typeof obj[key] === 'object' && obj[key] !== null) {
+          let found = findExoticsPayload(obj[key], depth + 1);
+          if (found) return found;
+        }
+      }
+    }
+    return null;
+  }
+
+  // Parses the Exotics payload into a { grid, poolTotal, baseUnit, poolType } object.
+  // grid[fromProgram][toProgram] = real $ payout per baseUnit stake, or null if self/scratched (-1.00 / -2.00 sentinels).
+  function parseExoticsGrid(payload) {
+    let grid = {};
+    let totalsRow = (payload.poolTotalsModels && payload.poolTotalsModels[0]) || {};
+    let poolTotal = getVal(totalsRow, 'Amount', 0);
+    let baseUnit = getVal(totalsRow, 'Base', 1) || 1;
+    let poolType = getStr(payload, 'poolType', 'EX');
+
+    let runList = (payload.Exotics && payload.Exotics.RunList) || [];
+    runList.forEach(row => {
+      let from = String(row.ProgramNumber);
+      grid[from] = grid[from] || {};
+      (row.Combos || []).forEach(c => {
+        let to = String(c.With);
+        let amt = parseFloat(c.Amount);
+        grid[from][to] = (isNaN(amt) || amt < 0) ? null : amt;
+      });
+    });
+
+    return { grid, poolTotal, baseUnit, poolType };
+  }
+
+  // Real per-$1 exacta payout for "from" finishing 1st and "to" finishing 2nd, or null if unavailable.
+  function getExactaPayout(from, to) {
+    let f = String(from), t = String(to);
+    if (cachedExactaGrid[f] && cachedExactaGrid[f][t] !== undefined && cachedExactaGrid[f][t] !== null) {
+      // grid values are per cachedExactaBaseUnit stake; normalize to a true per-$1 rate
+      return cachedExactaGrid[f][t] / (cachedExactaBaseUnit || 1);
+    }
+    return null;
+  }
+
+  // Finds the WPSPools payload (Win/Place/Show pool distribution from the Pools tab)
+  function findPoolsPayload(obj, depth = 0) {
+    if (!obj || typeof obj !== 'object' || depth > 5) return null;
+    if (obj.WPSPools && Array.isArray(obj.WPSPools.Entries)) return obj;
+    if (Array.isArray(obj)) {
+      for (let item of obj) {
+        let found = findPoolsPayload(item, depth + 1);
+        if (found) return found;
+      }
+    } else {
+      for (let key in obj) {
+        if (typeof obj[key] === 'object' && obj[key] !== null) {
+          let found = findPoolsPayload(obj[key], depth + 1);
+          if (found) return found;
+        }
+      }
+    }
+    return null;
+  }
+
+  // Parses the WPSPools payload. Win/Place/Show are $ amounts WAGERED on each horse (pool share),
+  // NOT payouts — confirmed by summing to the pool totals. Real payouts are derived separately
+  // via the pari-mutuel formula in getWinPoolPayout/getPlacePoolPayout below.
+  // Detects whether a pool's per-horse values are dollar amounts or percentages of the pool,
+  // purely from the data itself — dollar amounts across the field should sum close to the real
+  // pool total (usually thousands), percentages should sum close to 100. Whichever hypothesis
+  // fits better wins. Returns the values converted to dollar-equivalents either way, so downstream
+  // math (which assumes dollars) works correctly regardless of which display mode the page was in
+  // when the data was captured.
+  function normalizePoolValues(rawValues, poolTotal) {
+    let validSum = rawValues.filter(v => !isNaN(v) && v > 0).reduce((a, b) => a + b, 0);
+    if (validSum <= 0 || !poolTotal) return { values: rawValues, wasPercent: false };
+    let distFromPercent = Math.abs(validSum - 100);
+    let distFromDollar = Math.abs(validSum - poolTotal);
+    let looksLikePercent = distFromPercent < distFromDollar;
+    if (!looksLikePercent) return { values: rawValues, wasPercent: false };
+    return { values: rawValues.map(v => (isNaN(v) || v <= 0) ? v : (v / 100) * poolTotal), wasPercent: true };
+  }
+
+  function parsePoolsPayload(payload) {
+    let poolTotalsArr = payload.PoolTotals || [];
+    let winTotal = 0, placeTotal = 0, showTotal = 0, winBase = 1, placeBase = 1, showBase = 1;
+    poolTotalsArr.forEach(p => {
+      let type = getStr(p, 'PoolType', '');
+      if (type === 'WN') { winTotal = getVal(p, 'Amount', 0); winBase = getVal(p, 'Base', 1) || 1; }
+      else if (type === 'PL') { placeTotal = getVal(p, 'Amount', 0); placeBase = getVal(p, 'Base', 1) || 1; }
+      else if (type === 'SH') { showTotal = getVal(p, 'Amount', 0); showBase = getVal(p, 'Base', 1) || 1; }
+    });
+
+    let entries = (payload.WPSPools && payload.WPSPools.Entries) || [];
+
+    // Detect mode per pool (Win/Place/Show could in principle each be toggled independently,
+    // though in practice it's likely one page-wide toggle) using the raw values across all horses.
+    let rawWin = entries.map(e => getVal(e, 'Win', NaN));
+    let rawPlace = entries.map(e => getVal(e, 'Place', NaN));
+    let rawShow = entries.map(e => getVal(e, 'Show', NaN));
+    let winNorm = normalizePoolValues(rawWin, winTotal);
+    let placeNorm = normalizePoolValues(rawPlace, placeTotal);
+    let showNorm = normalizePoolValues(rawShow, showTotal);
+
+    let poolsMap = {};
+    let anyShow = false;
+    entries.forEach((e, i) => {
+      let prog = getStr(e, 'ProgramNumber');
+      let winAmt = winNorm.values[i];
+      let placeAmt = placeNorm.values[i];
+      let showAmt = showNorm.values[i];
+      if (showAmt > 0) anyShow = true;
+      poolsMap[prog] = {
+        win: (isNaN(winAmt) || winAmt < 0) ? null : winAmt,
+        place: (isNaN(placeAmt) || placeAmt < 0) ? null : placeAmt,
+        show: (isNaN(showAmt) || showAmt <= 0) ? null : showAmt
+      };
+    });
+
+    return {
+      poolsMap, winTotal, placeTotal, showTotal, showAvailable: anyShow,
+      detectedPercentMode: winNorm.wasPercent || placeNorm.wasPercent || showNorm.wasPercent
+    };
+  }
+
+  // Real total return per $1 WIN bet (includes stake), via the standard pari-mutuel formula:
+  // (Pool Total x (1 - takeout)) / $ wagered on this horse. Returns null if pool data unavailable.
+  function getWinPoolPayout(program) {
+    let entry = cachedPoolsMap[String(program)];
+    if (!entry || entry.win === null || entry.win <= 0 || !cachedWinPoolTotal) return null;
+    let netPool = cachedWinPoolTotal * (1 - TAKEOUT_RATE);
+    return netPool / entry.win;
+  }
+
+  // Real total return per $1 PLACE bet — the CORRECT pari-mutuel mechanism, not the WIN formula.
+  // Place/show pools are shared among however many horses actually finish in those positions: each
+  // placer's own stake is returned as principal first, then the remaining PROFIT is split EQUALLY
+  // among the placing horses (not proportionally to their stakes), and each horse's equal profit
+  // share is divided by THAT horse's own stake — which is exactly why a heavily-bet favorite pays
+  // less than a lightly-bet longshot even when both place. Verified against a real race: computed
+  // this way, estimates landed within a few cents of the actual posted payouts for all 3 SHOW
+  // horses; the old single-horse-takes-the-whole-pool formula overestimated by roughly 3x.
+  //
+  // Since we can't know in advance who ELSE will place, `assumedCoPlacerPrograms` should be the
+  // model's own top-ranked contenders (excluding `program` itself) as the best available guess —
+  // this is inherently an estimate, clearly labeled as such in the candidate's detail text.
+  function getPlacePoolPayout(program, assumedCoPlacerPrograms) {
+    if (!cachedPlacePoolTotal) return null;
+    let allPlacers = [String(program)].concat((assumedCoPlacerPrograms || []).map(String));
+    let stakes = allPlacers.map(p => {
+      let entry = cachedPoolsMap[p];
+      return (entry && entry.place !== null && entry.place > 0) ? entry.place : null;
+    });
+    if (stakes.some(s => s === null)) return null;
+    let targetStake = stakes[0];
+    let combinedStakes = stakes.reduce((a, b) => a + b, 0);
+    let netPool = cachedPlacePoolTotal * (1 - TAKEOUT_RATE);
+    let profitPool = netPool - combinedStakes;
+    if (profitPool <= 0) return null;
+    let profitPerPlacer = profitPool / allPlacers.length;
+    return 1 + (profitPerPlacer / targetStake);
+  }
+
+  // Real total return per $1 SHOW bet — same corrected mechanism as PLACE above, split among 3
+  // assumed co-placers instead of 2.
+  function getShowPoolPayout(program, assumedCoPlacerPrograms) {
+    if (!cachedShowPoolTotal) return null;
+    let allPlacers = [String(program)].concat((assumedCoPlacerPrograms || []).map(String));
+    let stakes = allPlacers.map(p => {
+      let entry = cachedPoolsMap[p];
+      return (entry && entry.show !== null && entry.show > 0) ? entry.show : null;
+    });
+    if (stakes.some(s => s === null)) return null;
+    let targetStake = stakes[0];
+    let combinedStakes = stakes.reduce((a, b) => a + b, 0);
+    let netPool = cachedShowPoolTotal * (1 - TAKEOUT_RATE);
+    let profitPool = netPool - combinedStakes;
+    if (profitPool <= 0) return null;
+    let profitPerPlacer = profitPool / allPlacers.length;
+    return 1 + (profitPerPlacer / targetStake);
+  }
+
   function parseAndMergeRunnerRow(r) {
     if (!r || typeof r !== 'object') return null;
 
@@ -547,6 +1019,7 @@
     let prog = getStr(r, ['programNumber', 'postPosition'], '1');
     let post = getVal(r, ['postPosition', 'programNumber'], parseInt(prog) || 1);
 
+    // Direct Boolean Check for Scratched Runners
     let isScratched = r.scratched === true || 
                       r.isScratched === true || 
                       String(r.scratched).toLowerCase() === 'true' || 
@@ -626,9 +1099,68 @@
       return numA - numB;
     });
 
-    let headerRow = Object.keys(sorted[0]).join(',');
-    let dataRows = sorted.map(h => Object.values(h).join(',')).join('\n');
+    let liveProgramNumbers = sorted.filter(h => !h.IS_SCRATCHED && !cachedScratchedMap[h.PROGRAM]).map(h => h.PROGRAM);
+
+    // Extends each raw horse row with the DERIVED values the model actually computes/uses from
+    // that raw data (parsed odds, real pool payout rates, one sample exacta combo) — so blanks or
+    // parsing failures downstream of the raw fields are visible here too, not just missing raw data.
+    let extendedRows = sorted.map(h => {
+      let mlDec = parseOddsToDecimal(h.ML_ODDS);
+      let liveDec = parseOddsToDecimal(h.LIVE_ODDS);
+      let oddsNumeric = !isNaN(liveDec) && liveDec > 0 ? liveDec : mlDec;
+
+      let poolEntry = cachedPoolsMap[h.PROGRAM];
+      let winPayout = getWinPoolPayout(h.PROGRAM);
+      let placePayout = getPlacePoolPayout(h.PROGRAM);
+      let showPayout = getShowPoolPayout(h.PROGRAM);
+
+      // One sample exacta combo per horse (paired with the first other live horse) — just enough
+      // to confirm the Probables grid actually loaded data for this horse, without dumping the
+      // full N-1 row of combos per horse.
+      let otherProg = liveProgramNumbers.find(p => p !== h.PROGRAM);
+      let exactaSample = '""';
+      if (otherProg) {
+        let payout = getExactaPayout(h.PROGRAM, otherProg);
+        exactaSample = `"#${h.PROGRAM}/#${otherProg}: ${payout !== null ? '$' + payout.toFixed(2) : 'N/A'}"`;
+      }
+
+      return Object.assign({}, h, {
+        ODDS_NUMERIC: !isNaN(oddsNumeric) ? oddsNumeric : '',
+        WIN_POOL_AMT: (poolEntry && poolEntry.win !== null) ? poolEntry.win : '',
+        PLACE_POOL_AMT: (poolEntry && poolEntry.place !== null) ? poolEntry.place : '',
+        SHOW_POOL_AMT: (poolEntry && poolEntry.show !== null) ? poolEntry.show : '',
+        WIN_PAYOUT_RATE: winPayout !== null ? winPayout.toFixed(2) : '',
+        PLACE_PAYOUT_RATE: placePayout !== null ? placePayout.toFixed(2) : '',
+        SHOW_PAYOUT_RATE: showPayout !== null ? showPayout.toFixed(2) : '',
+        EXACTA_SAMPLE: exactaSample
+      });
+    });
+
+    let headerRow = Object.keys(extendedRows[0]).join(',');
+    let dataRows = extendedRows.map(h => Object.values(h).join(',')).join('\n');
     return `${headerRow}\n${dataRows}`;
+  }
+
+  // Race-wide values (not per-horse) the model reads — pool totals, condition/wetness detection,
+  // exacta base unit, and the takeout constant used across the payout formulas. Kept as a separate
+  // small CSV block since it's a different schema than the per-horse rows or the meet/week IV stats.
+  function getRaceWidePoolsCsv() {
+    let header = 'WIN_POOL_TOTAL,PLACE_POOL_TOTAL,SHOW_POOL_TOTAL,SHOW_POOL_AVAILABLE,POOLS_PERCENT_MODE_DETECTED,EXACTA_POOL_TOTAL,EXACTA_BASE_UNIT,TRACK_CONDITION,WETNESS_TIER,POST_TIME,TAKEOUT_RATE';
+    let wetnessTier = getWetnessTier(cachedTrackCondition);
+    let row = [
+      cachedWinPoolTotal || 0,
+      cachedPlacePoolTotal || 0,
+      cachedShowPoolTotal || 0,
+      cachedShowPoolAvailable,
+      cachedPoolsWasPercentMode,
+      cachedExactaPoolTotal || 0,
+      cachedExactaBaseUnit || 1,
+      cachedTrackCondition ? `"${cachedTrackCondition}"` : '""',
+      wetnessTier,
+      cachedPostTime ? `"${cachedPostTime}"` : '""',
+      TAKEOUT_RATE
+    ].join(',');
+    return `${header}\n${row}`;
   }
 
   function parseStatsRows(s) {
@@ -683,14 +1215,14 @@
     return [meetRow, weekRow];
   }
 
-  function calculateModelOutput() {
+  function calculateModelOutput(forcedWeightKey) {
     let runnerKeys = Object.keys(cachedHorsesMap);
     if (runnerKeys.length < 3) {
       return {
         ruleAppliedMsg: "Awaiting field data...",
         leaderboard: [],
         gaps: [],
-        wagerRecs: { optionA: "N/A", optionB: "N/A", optionC: null, scenario: "Insufficient Data" }
+        wagerRecs: { scenario: "Insufficient Data", optionRows: [{ label: 'A', isPass: true, passReason: 'Awaiting field data' }, { label: 'B', isPass: true, passReason: 'Awaiting field data' }] }
       };
     }
 
@@ -698,17 +1230,24 @@
     let cleanBreed = cachedBreed || "Thoroughbred";
 
     const weightsDict = {
-      'Thoroughbred': { W_Speed: 0.18, W_Power: 0.10, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.06, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Market: 0.03 },
+      'Thoroughbred': { W_Speed: 0.17, W_Power: 0.09, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.08, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Market: 0.03 },
       'Harness': { W_Speed: 0.16, W_Power: 0.07, W_Class: 0.13, W_Distance: 0.04, W_Driver: 0.18, W_Trainer: 0.06, W_Early: 0.18, W_Finish: 0.08, W_Recency: 0.04, W_Market: 0.03 },
       'Quarter Horse': { W_Speed: 0.26, W_Power: 0.10, W_Class: 0.09, W_Distance: 0.02, W_Driver: 0.07, W_Trainer: 0.07, W_Early: 0.34, W_Finish: 0.00, W_Recency: 0.02, W_Market: 0.03 },
       'Special': { W_Speed: 0.17, W_Power: 0.08, W_Class: 0.15, W_Distance: 0.08, W_Driver: 0.06, W_Trainer: 0.09, W_Early: 0.14, W_Finish: 0.11, W_Recency: 0.03, W_Market: 0.09 }
     };
 
-    let isSpecialTrack = cleanTrack.toLowerCase().includes('churchill') || 
-                         cleanTrack.toLowerCase().includes('horseshoe indianapolis') || 
-                         cleanTrack.toLowerCase().includes('indiana grand');
+    // Tracks using the back-tested "Special" weight set instead of default Thoroughbred weights.
+    // Deliberately hardcoded rather than inferred from live pool size — pool totals can nearly
+    // double in the final minute to post at major tracks (computer-automated betting), which would
+    // make a live-data threshold change the weight set out from under a bet you already decided on.
+    // Only add a track here after independently testing it the way Churchill and Horseshoe
+    // Indianapolis were tested — this list should never be a guess.
+    const SPECIAL_WEIGHT_TRACKS = ['churchill', 'horseshoe indianapolis'];
 
-    let activeWeightKey = isSpecialTrack ? 'Special' : (weightsDict[cleanBreed] ? cleanBreed : 'Thoroughbred');
+    let isSpecialTrack = cleanBreed === 'Thoroughbred' &&
+      SPECIAL_WEIGHT_TRACKS.some(t => cleanTrack.toLowerCase().includes(t));
+
+    let activeWeightKey = forcedWeightKey || (isSpecialTrack ? 'Special' : (weightsDict[cleanBreed] ? cleanBreed : 'Thoroughbred'));
     let activeWeights = Object.assign({}, weightsDict[activeWeightKey]);
 
     let weekRaces = 0, meetRaces = 100;
@@ -764,9 +1303,11 @@
 
     ruleAppliedMsg += ` | [Weight Set: ${activeWeightKey}]`;
 
-    let isWet = isHeavyWetTrack(cachedTrackCondition);
+    let wetnessTier = getWetnessTier(cachedTrackCondition);
+    let isWet = wetnessTier > 0;
     if (isWet) {
-      ruleAppliedMsg += ` | [Track Condition: ${cachedTrackCondition.toUpperCase()} — Power Bonus Zeroed]`;
+      let tierLabel = wetnessTier === 2 ? 'Tier 2: Sloppy/Muddy/Heavy' : 'Tier 1: Off/Yielding';
+      ruleAppliedMsg += ` | [Track Condition: ${cachedTrackCondition.toUpperCase()} — ${tierLabel} — Power Bonus Zeroed]`;
     }
 
     let activeSpeedBias = (wWeek * weekBias) + (wMeet * meetBias);
@@ -827,9 +1368,25 @@
       return 0.0;
     }
 
+    // Wet-track early-speed bonus: on off/sloppy/muddy tracks, front-runners and early-pace
+    // horses tend to benefit (clear of kickback, firmer worked-up ground). Pure closers get none.
+    // This stacks ON TOP OF calcStyleBonus's 5.0 cap rather than sharing it, since it reflects a
+    // separate signal (today's track condition) rather than the meet/week run-style IV data.
+    const WET_STYLE_FACTOR = { 'E': 1.0, 'E/P': 0.65, 'P': 0.25, 'S': 0.0 };
+    const WET_TIER_MAX_BONUS = { 1: 0.75, 2: 1.5 }; // tier 1 = off/yielding, tier 2 = sloppy/muddy/heavy
+
+    function calcWetStyleBonus(code, pts, tier) {
+      if (!tier || tier < 1) return 0.0;
+      let styleFactor = WET_STYLE_FACTOR[code] !== undefined ? WET_STYLE_FACTOR[code] : 0.0;
+      if (styleFactor <= 0.0) return 0.0;
+      let ptsFactor = Math.min(Math.max(parseFloat(pts) / 8.0, 0.0), 1.0);
+      let maxBonus = WET_TIER_MAX_BONUS[tier] || 0.0;
+      return Math.round(maxBonus * styleFactor * ptsFactor * 100) / 100;
+    }
+
     let runners = Object.values(cachedHorsesMap).map(h => Object.assign({}, h));
 
-    let numCols = ['PRM_PWR', 'AVG_SPD', 'BACK_SPD', 'SPD_LR', 'AVG_CLS', 'LAST_CLS', 'AVG_DIST_SPD', 'BEST_SPD', 'W_JKY', 'W_TRN', 'E1', 'E2', 'LP', 'DAYS_OFF'];
+    let numCols = SCORING_NUM_FIELDS;
     numCols.forEach(col => {
       let validVals = runners.map(r => parseFloat(r[col]) || 0).filter(v => v > 0);
       let avg = validVals.length > 0 ? validVals.reduce((a, b) => a + b, 0) / validVals.length : 0.0;
@@ -906,14 +1463,18 @@
       let postCat = getPostCat(r.POST);
       let postBonus = calcPostBonus(postCat);
       let styleBonus = calcStyleBonus(r.RUN_STYLE, r.RUN_STYLE_PTS);
+      let wetBonus = calcWetStyleBonus(r.RUN_STYLE, r.RUN_STYLE_PTS, wetnessTier);
 
       r.POWER_BONUS = powerBonus;
       r.BASE_SKILL = Math.round(baseSkill * 100) / 100;
       r.POST_BONUS = postBonus;
       r.STYLE_BONUS = styleBonus;
+      r.WET_BONUS = wetBonus;
 
-      let calculatedScore = Math.round((baseSkill + postBonus + styleBonus + powerBonus) * 100) / 100;
+      // Calculate candidate final score
+      let calculatedScore = Math.round((baseSkill + postBonus + styleBonus + powerBonus + wetBonus) * 100) / 100;
 
+      // Zero out final score at the very end if scratched
       if (r.IS_SCRATCHED === true || cachedScratchedMap[r.PROGRAM]) {
         r.FINAL_SCORE = 0;
       } else {
@@ -945,105 +1506,333 @@
     let gap13 = Math.round((s1 - s3) * 100) / 100;
     let gap14 = Math.round((s1 - s4) * 100) / 100;
 
-    let p1 = top1 ? top1.PROGRAM : "N/A";
-    let p2 = top2 ? top2.PROGRAM : "N/A";
-    let p3 = top3 ? top3.PROGRAM : "N/A";
-    let p4 = top4 ? top4.PROGRAM : "N/A";
+    // ---------------------------------------------------------------
+    // WAGER RECOMMENDATION ENGINE (probability + expected-value based)
+    // ---------------------------------------------------------------
+    // Replaces the old static point-gap tiers with:
+    //  1) A blended win-probability model (market-implied probability, tilted by our score edge)
+    //  2) Harville-derived exacta/box hit probabilities from those win probabilities
+    //  3) Real exacta payouts from the Probables tab (cachedExactaGrid) when available,
+    //     falling back to a generalized odds-derived estimate only if that grid hasn't loaded yet
+    //  4) Expected value (EV) per dollar for every candidate bet, dynamically priced $2-$6
+    //     off the size of the edge, instead of fixed tier dollar amounts
 
-    let odds1 = top1 && !isNaN(top1.ODDS_NUMERIC) ? top1.ODDS_NUMERIC : NaN;
-    let odds2 = top2 && !isNaN(top2.ODDS_NUMERIC) ? top2.ODDS_NUMERIC : NaN;
+    let liveRunners = runners.filter(r => !(r.IS_SCRATCHED === true || cachedScratchedMap[r.PROGRAM]));
+    let winProbs = {}; // program -> { modelProb, zScore }
+    const MAX_Z_REF = 2.5; // cap on standardized score, avoids runaway probabilities/conviction from outlier scores
 
-    let scenario = "", optionA = "", optionB = "", optionC = null;
-    let isChurchill = cleanTrack.toLowerCase().includes("churchill") || cleanTrack.toLowerCase() === "cd";
-
-    let oddCount = 0, evenCount = 0;
-    topField.slice(0, 4).forEach(r => {
-      let pNum = parseInt(String(r.PROGRAM).replace(/\D/g, ''), 10);
-      if (!isNaN(pNum)) {
-        if (pNum % 2 !== 0) oddCount++;
-        else evenCount++;
-      }
-    });
-
-    if (gap12 < 1.5 && gap23 < 1.5) {
-      scenario = "Tier 4: Ultra-Competitive / Tight Field (Gap_1_2 < 1.5 & Gap_2_3 < 1.5)";
-      if (isChurchill && (oddCount >= 3 || evenCount >= 3)) {
-        let prefSide = oddCount >= 3 ? "ODD" : "EVEN";
-        optionA = "$0 (PASS / NO BET - Tight Field Capital Protection)";
-        optionB = `$2 Odd/Even Bet on [${prefSide}] (Churchill Special Exception: ${Math.max(oddCount, evenCount)} of top 4 picks are ${prefSide})`;
-      } else {
-        optionA = "$0 (PASS / NO BET - Capital Protection Rule)";
-        optionB = `3-Horse Exacta Box: #${p1}, #${p2}, #${p3} (6 combos / low cost speculative only)`;
-      }
-    } 
-    else if (gap12 >= 5.0) {
-      scenario = `Tier 1: Dominant Top Pick (#${p1} Gap_1_2 = ${gap12.toFixed(1)})`;
-      
-      if (!isNaN(odds1) && odds1 >= 2.0) {
-        if (gap12 >= 7.0 && odds1 >= 3.0) {
-          optionA = `$4 WIN on #${p1} (Max Value Overlay: Gap >= 7.0 & Odds >= 3/1)`;
-        } else if (odds1 >= 3.0) {
-          optionA = `$4 WIN on #${p1} (High Value Overlay: Odds >= 3/1)`;
-        } else {
-          optionA = `$3 WIN on #${p1} (Dominant Lead with Fair 2/1 to 3/1 Odds)`;
-        }
-        optionB = `Straight Exacta: #${p1} / #${p2}, #${p3}`;
-      } else {
-        let estExactaPayout = (!isNaN(odds1) && !isNaN(odds2) && odds1 > 0 && odds2 > 0) 
-          ? ((odds1 + 1) * (odds2 + 1) * 2.0) 
-          : 0;
-
-        if (estExactaPayout >= 8.0) {
-          optionA = `$2 Straight Exacta: #${p1} over #${p2} (Exacta Pivot: Est. Payout $${estExactaPayout.toFixed(2)} >= $8.00)`;
-          optionB = `$2 or $3 PLACE on #${p2} (Secondary Value Pivot)`;
-        } else if (!isNaN(odds2) && odds2 >= 2.0) {
-          optionA = `$2 PLACE on #${p2} (Place Pivot: #${p2} offers fair value while #${p1} is low-payout)`;
-          optionB = `$2 Straight Exacta: #${p1} / #${p2}, #${p3}`;
-        } else if (!isNaN(odds1) && odds1 <= 0.5) {
-          optionA = "$0 (PASS / NO BET) - Heavy favorite (< 6/5 odds) with no exotic value";
-          optionB = `Exacta Key: #${p1} / #${p2}, #${p3}`;
-        } else {
-          optionA = `$2 PLACE on #${p1} (Safety Pivot on low Win odds)`;
-          optionB = `Exacta Key: #${p1} / #${p2}, #${p3}`;
-        }
-      }
-    } 
-    else if (gap12 >= 2.0 && gap12 < 5.0) {
-      scenario = `Tier 2: Moderate Lead (#${p1} Gap_1_2 = ${gap12.toFixed(1)})`;
-      
-      if (!isNaN(odds1) && odds1 >= 3.0) {
-        optionA = `$2 WIN on #${p1} (Odds >= 3/1 justify moderate risk)`;
-        optionB = `Exacta Box: #${p1}, #${p2}`;
-      } else {
-        optionA = `$2 PLACE on #${p1} (Safety First Pivot: Odds < 3/1 without massive score lead)`;
-        optionB = `Exacta Box: #${p1}, #${p2}`;
-      }
-    } 
-    else if (gap12 < 2.0 && gap23 >= 4.0) {
-      scenario = `Tier 3: Split Top Two (#${p1} & #${p2} separated from field)`;
-      
-      let higherOddsPick = (!isNaN(odds2) && !isNaN(odds1) && odds2 > odds1) ? p2 : p1;
-      let higherOddsVal = (!isNaN(odds2) && !isNaN(odds1) && odds2 > odds1) ? odds2 : odds1;
-
-      optionA = `$2 Exacta Box: #${p1}, #${p2} ($1 base = $2 total, covers both permutations)`;
-      optionB = `$2 PLACE on #${higherOddsPick} (Exploiting market inefficiency on under-bet pick: ${higherOddsVal > 0 ? higherOddsVal.toFixed(1) + '/1' : 'higher odds'})`;
-    } 
-    else {
-      scenario = "Standard Competitive Field";
-      optionA = (!isNaN(odds1) && odds1 >= 3.0) ? `$2 WIN on #${p1}` : `$2 PLACE on #${p1}`;
-      optionB = `Exacta Box: #${p1}, #${p2}`;
+    // A "typical" leader in a modest field sits roughly 1-1.5 SD above the field average purely
+    // from order-statistics (the best of N horses is expected to look somewhat above-average even
+    // with no real edge) — a plain z/MAX_Z_REF mapping was treating that as meaningfully confident,
+    // which structurally skewed stakes toward $4 for perfectly ordinary favorites. BASELINE_Z shifts
+    // the zero-point: only a leader clearly ABOVE typical starts scaling stake past the $2 floor.
+    const BASELINE_Z = 1.3;
+    function computeConviction(zScore) {
+      let excess = Math.max(0, zScore - BASELINE_Z);
+      return Math.min(excess / (MAX_Z_REF - BASELINE_Z), 1);
     }
 
-    if (isChurchill && runners.length >= 4 && !optionC) {
-      let pref = oddCount >= evenCount ? "ODD" : "EVEN";
-      optionC = `CHURCHILL ODD/EVEN WAGER: $2 Bet on [${pref}] (${Math.max(oddCount, evenCount)} of top 4 picks are ${pref})`;
+    // Win probability is derived ONLY from the model's own FINAL_SCORE (which already has its own
+    // market/odds component baked in via W_Market — see baseSkill). Live odds are NOT blended in here;
+    // they're used later strictly to price the WIN bet's payout, per the design correction below.
+    if (liveRunners.length >= 2) {
+      let scoreVals = liveRunners.map(r => r.FINAL_SCORE);
+      let meanScore = scoreVals.reduce((a, b) => a + b, 0) / scoreVals.length;
+      let variance = scoreVals.reduce((a, b) => a + Math.pow(b - meanScore, 2), 0) / scoreVals.length;
+      let stdevScore = Math.sqrt(variance) || 1;
+
+      const SCORE_PROB_K = 0.70; // controls how sharply score gaps translate into probability separation
+
+      let zArr = liveRunners.map(r => Math.max(-MAX_Z_REF, Math.min(MAX_Z_REF, (r.FINAL_SCORE - meanScore) / stdevScore)));
+      let rawArr = zArr.map(z => Math.exp(SCORE_PROB_K * z));
+      let rawSum = rawArr.reduce((a, b) => a + b, 0) || 1;
+
+      liveRunners.forEach((r, i) => {
+        winProbs[r.PROGRAM] = { modelProb: rawArr[i] / rawSum, zScore: zArr[i] };
+      });
+    }
+
+    // Harville extension: P(A 1st, B 2nd) = P(A) * P(B) / (1 - P(A))
+    function exactaOrderProb(progA, progB) {
+      let pA = winProbs[progA] ? winProbs[progA].modelProb : 0;
+      let pB = winProbs[progB] ? winProbs[progB].modelProb : 0;
+      if (pA <= 0 || pA >= 1) return 0;
+      return pA * (pB / (1 - pA));
+    }
+
+    // Probability horse finishes 1st OR 2nd (top-2 / "place"), purely from our own score-based
+    // winProbs — same Harville logic, summed over every other horse's chance of winning with
+    // this one taking 2nd behind them. No market data involved, consistent with the WIN model.
+    function placeProbabilityOf(prog) {
+      let pi = winProbs[prog] ? winProbs[prog].modelProb : 0;
+      if (pi <= 0) return 0;
+      let sumSecond = 0;
+      liveRunners.forEach(r => {
+        if (String(r.PROGRAM) === String(prog)) return;
+        let pj = winProbs[r.PROGRAM] ? winProbs[r.PROGRAM].modelProb : 0;
+        if (pj >= 1) return;
+        sumSecond += pj * (pi / (1 - pj));
+      });
+      return Math.min(1, pi + sumSecond);
+    }
+
+    // Probability horse finishes 1st, 2nd, OR 3rd ("show"), extending the same Harville logic one
+    // level further: sum over every ordered pair of other horses taking 1st and 2nd, times this
+    // horse taking 3rd given both are gone. Purely score-derived, no market data — consistent with
+    // WIN and PLACE above.
+    function showProbabilityOf(prog) {
+      let pi = winProbs[prog] ? winProbs[prog].modelProb : 0;
+      if (pi <= 0) return 0;
+      let base = placeProbabilityOf(prog); // covers 1st + 2nd
+      let thirdSum = 0;
+      liveRunners.forEach(rj => {
+        if (String(rj.PROGRAM) === String(prog)) return;
+        let pj = winProbs[rj.PROGRAM] ? winProbs[rj.PROGRAM].modelProb : 0;
+        if (pj <= 0 || pj >= 1) return;
+        liveRunners.forEach(rk => {
+          if (String(rk.PROGRAM) === String(prog) || String(rk.PROGRAM) === String(rj.PROGRAM)) return;
+          let pk = winProbs[rk.PROGRAM] ? winProbs[rk.PROGRAM].modelProb : 0;
+          let denom2 = 1 - pj;
+          if (denom2 <= 0) return;
+          let pkGivenJ = pk / denom2;
+          let denom3 = 1 - pj - pk;
+          if (denom3 <= 0) return;
+          thirdSum += pj * pkGivenJ * (pi / denom3);
+        });
+      });
+      return Math.min(1, base + thirdSum);
+    }
+
+    // Real live probable payout ONLY — no odds-based fallback. If the real grid doesn't have this
+    // combo loaded yet, returns null so the candidate simply isn't generated until real data is
+    // available, matching how PLACE and SHOW already behave. The old fallback (multiplying both
+    // horses' odds together) was a reasonable rough approximation for one combo, but broke down
+    // badly once summed across all 6 combos of a 3-horse box simultaneously — waiting for real data
+    // is more honest than bounding a formula that shouldn't be trusted at all.
+    function exactaPayoutEstimate(progA, progB) {
+      let real = getExactaPayout(progA, progB);
+      return real !== null ? { value: real, isReal: true } : null;
+    }
+
+    // Dynamic $2-$6 stake sizing off an edge fraction (0-1), rounded to the nearest stepUnit
+    function scaleStake(edgeFraction, minTotal, maxTotal, stepUnit) {
+      let clamped = Math.max(0, Math.min(1, edgeFraction));
+      let raw = minTotal + clamped * (maxTotal - minTotal);
+      let stepped = Math.round(raw / stepUnit) * stepUnit;
+      return Math.max(minTotal, Math.min(maxTotal, stepped));
+    }
+
+    let candidates = [];
+    let baseU = cachedExactaBaseUnit || 1;
+
+    if (liveRunners.length >= 2) {
+      let ranked = liveRunners.slice().sort((a, b) =>
+        (winProbs[b.PROGRAM] ? winProbs[b.PROGRAM].modelProb : 0) - (winProbs[a.PROGRAM] ? winProbs[a.PROGRAM].modelProb : 0)
+      );
+      let c1 = ranked[0], c2 = ranked[1], c3 = ranked[2];
+
+      // --- WIN on top model pick (only added when real win-pool data is available — no odds-based
+      // fallback anymore; if nothing has real pool data yet, no wager candidates are shown at all
+      // rather than recommending off a less-reliable estimate) ---
+      // Conviction (and therefore stake size) comes ONLY from how much of a score outlier the top
+      // pick is (its z-score) — never from odds or pool data.
+      if (c1) {
+        let realWinPayoutRate = getWinPoolPayout(c1.PROGRAM);
+        if (realWinPayoutRate !== null) {
+          let pWin = winProbs[c1.PROGRAM].modelProb;
+          let conviction = computeConviction(winProbs[c1.PROGRAM].zScore);
+          let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
+          let payoutIfWin = stake * realWinPayoutRate;
+          let ev = pWin * payoutIfWin - stake;
+          candidates.push({
+            type: 'WIN', typeLabel: 'Win', horses: `#${c1.PROGRAM}`,
+            label: `$${stake} WIN on #${c1.PROGRAM}`,
+            cost: stake, hitProb: pWin, ev, evPerDollar: ev / stake,
+            payoutLow: payoutIfWin, payoutHigh: payoutIfWin,
+            isRealData: true,
+            detail: `Model Win Prob ${(pWin * 100).toFixed(0)}% (Live Pool Payout)`
+          });
+        }
+      }
+
+      // --- PLACE on top model pick (only added when real place-pool data is available) ---
+      if (c1 && c2) {
+        let realPlacePayoutRate = getPlacePoolPayout(c1.PROGRAM, [c2.PROGRAM]);
+        if (realPlacePayoutRate !== null) {
+          let pPlace = placeProbabilityOf(c1.PROGRAM);
+          if (pPlace > 0) {
+            let conviction = computeConviction(winProbs[c1.PROGRAM].zScore);
+            let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
+            let payoutIfPlace = stake * realPlacePayoutRate;
+            let ev = pPlace * payoutIfPlace - stake;
+            candidates.push({
+              type: 'PLACE', typeLabel: 'Place', horses: `#${c1.PROGRAM}`,
+              label: `$${stake} PLACE on #${c1.PROGRAM}`,
+              cost: stake, hitProb: pPlace, ev, evPerDollar: ev / stake,
+              payoutLow: payoutIfPlace, payoutHigh: payoutIfPlace,
+              isRealData: true,
+              detail: `Model Place Prob ${(pPlace * 100).toFixed(0)}% (Live Pool Payout, assumes #${c2.PROGRAM} is the other placer)`
+            });
+          }
+        }
+      }
+
+      // --- SHOW on top model pick (only added when real show-pool data is available) ---
+      if (c1 && c2 && c3) {
+        let realShowPayoutRate = getShowPoolPayout(c1.PROGRAM, [c2.PROGRAM, c3.PROGRAM]);
+        if (realShowPayoutRate !== null) {
+          let pShow = showProbabilityOf(c1.PROGRAM);
+          if (pShow > 0) {
+            let conviction = computeConviction(winProbs[c1.PROGRAM].zScore);
+            let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
+            let payoutIfShow = stake * realShowPayoutRate;
+            let ev = pShow * payoutIfShow - stake;
+            candidates.push({
+              type: 'SHOW', typeLabel: 'Show', horses: `#${c1.PROGRAM}`,
+              label: `$${stake} SHOW on #${c1.PROGRAM}`,
+              cost: stake, hitProb: pShow, ev, evPerDollar: ev / stake,
+              payoutLow: payoutIfShow, payoutHigh: payoutIfShow,
+              isRealData: true,
+              detail: `Model Show Prob ${(pShow * 100).toFixed(0)}% (Live Pool Payout, assumes #${c2.PROGRAM}/#${c3.PROGRAM} are the other placers)`
+            });
+          }
+        }
+      }
+
+      // A straight exacta or 2-horse box both deliberately exclude c3 in favor of c2 for the
+      // "second place" slot — defensible only when c2 is genuinely more likely than c3. When
+      // they're close, arbitrarily picking one over the other throws away real probability mass;
+      // the 3-horse box already covers both, so it's the honest candidate in that situation.
+      // Uses win-probability ratio, not a raw score-point gap, so it scales correctly whether the
+      // field is tightly bunched or widely spread (same reasoning as the rest of this engine).
+      const NEAR_TIE_PROB_RATIO = 0.85;
+      let c2c3NearTie = false;
+      if (c2 && c3) {
+        let p2 = winProbs[c2.PROGRAM] ? winProbs[c2.PROGRAM].modelProb : 0;
+        let p3 = winProbs[c3.PROGRAM] ? winProbs[c3.PROGRAM].modelProb : 0;
+        if (p2 > 0 && (p3 / p2) >= NEAR_TIE_PROB_RATIO) c2c3NearTie = true;
+      }
+
+      // --- Straight exacta: top 2 model picks, in that order ---
+      if (c1 && c2 && !c2c3NearTie) {
+        let pOrder = exactaOrderProb(c1.PROGRAM, c2.PROGRAM);
+        let payout = exactaPayoutEstimate(c1.PROGRAM, c2.PROGRAM);
+        if (payout && payout.value > 0 && pOrder > 0) {
+          let fairPayout = 1 / pOrder;
+          let edge = Math.max(0, (payout.value - fairPayout) / fairPayout);
+          let baseStake = Math.max(baseU, scaleStake(Math.min(edge, 1), 2, 6, baseU));
+          let cost = baseStake * 1;
+          let payoutIfHit = payout.value * baseStake;
+          let ev = pOrder * payoutIfHit - cost;
+          candidates.push({
+            type: 'EXACTA_STRAIGHT', typeLabel: 'Exacta (Straight)', horses: `#${c1.PROGRAM}/#${c2.PROGRAM}`,
+            label: `$${cost.toFixed(0)} Straight Exacta: #${c1.PROGRAM} / #${c2.PROGRAM}`,
+            cost, hitProb: pOrder, ev, evPerDollar: ev / cost,
+            payoutLow: payoutIfHit * 0.85, payoutHigh: payoutIfHit * 1.15,
+            isRealData: true,
+            detail: `Live Probable $${payout.value.toFixed(2)}/$1 base`
+          });
+        }
+      }
+
+      // --- 2-horse exacta box ---
+      if (c1 && c2 && !c2c3NearTie) {
+        let pAB = exactaOrderProb(c1.PROGRAM, c2.PROGRAM);
+        let pBA = exactaOrderProb(c2.PROGRAM, c1.PROGRAM);
+        let payAB = exactaPayoutEstimate(c1.PROGRAM, c2.PROGRAM);
+        let payBA = exactaPayoutEstimate(c2.PROGRAM, c1.PROGRAM);
+        let pBox = pAB + pBA;
+        if (pBox > 0 && payAB && payBA && payAB.value > 0 && payBA.value > 0) {
+          let cost = baseU * 2;
+          let expectedPayout = (pAB * payAB.value + pBA * payBA.value) * baseU;
+          let ev = expectedPayout - cost;
+          candidates.push({
+            type: 'EXACTA_BOX2', typeLabel: 'Exacta Box (2)', horses: `#${c1.PROGRAM}, #${c2.PROGRAM}`,
+            label: `$${cost.toFixed(0)} Exacta Box: #${c1.PROGRAM}, #${c2.PROGRAM}`,
+            cost, hitProb: pBox, ev, evPerDollar: ev / cost,
+            payoutLow: Math.min(payAB.value, payBA.value) * baseU * 0.85, payoutHigh: Math.max(payAB.value, payBA.value) * baseU * 1.15,
+            isRealData: true,
+            detail: `Live Probables, ${(pBox * 100).toFixed(0)}% modeled hit rate`
+          });
+        }
+      }
+
+      // --- 3-horse exacta box ---
+      if (c1 && c2 && c3) {
+        let progs = [c1.PROGRAM, c2.PROGRAM, c3.PROGRAM];
+        let combos = [];
+        for (let i = 0; i < 3; i++) {
+          for (let j = 0; j < 3; j++) {
+            if (i !== j) combos.push([progs[i], progs[j]]);
+          }
+        }
+        let cost = baseU * combos.length; // 6 combos
+        let pBox = 0, expectedPayout = 0, allReal = true;
+        combos.forEach(([a, b]) => {
+          let p = exactaOrderProb(a, b);
+          let pay = exactaPayoutEstimate(a, b);
+          if (!pay || !pay.isReal) allReal = false;
+          pBox += p;
+          expectedPayout += p * (pay ? pay.value : 0) * baseU;
+        });
+        // Only recommend this box once every combo it needs is backed by real data — a partial
+        // estimate mixing real and missing combos would still misrepresent the true payout.
+        if (allReal) {
+          let ev = expectedPayout - cost;
+          candidates.push({
+            type: 'EXACTA_BOX3', typeLabel: 'Exacta Box (3)', horses: `#${c1.PROGRAM}, #${c2.PROGRAM}, #${c3.PROGRAM}`,
+            label: `$${cost.toFixed(0)} 3-Horse Exacta Box: #${c1.PROGRAM}, #${c2.PROGRAM}, #${c3.PROGRAM}`,
+            cost, hitProb: pBox, ev, evPerDollar: ev / cost,
+            payoutLow: expectedPayout * 0.7, payoutHigh: expectedPayout * 1.3,
+            isRealData: true,
+            detail: `Live Probables, ${(pBox * 100).toFixed(0)}% modeled hit rate (6 combos)`
+          });
+        }
+      }
+    }
+
+    let positiveEv = candidates.filter(c => c.ev > 0 && c.cost > 0);
+    // Payout ratio uses the conservative (low) end of the estimated range, so a candidate only
+    // clears the bar if it's still worth it even under the more pessimistic payout estimate.
+    let worthwhile = positiveEv.filter(c => (c.payoutLow / c.cost) >= MIN_PAYOUT_RATIO);
+    let scenario = "";
+    let optionRows = [];
+
+    if (positiveEv.length === 0) {
+      scenario = liveRunners.length < 2 ? "Insufficient Live Runners" : "No Positive-EV Wager Identified — field too closely matched to find a real edge";
+      optionRows = [
+        { label: 'A', isPass: true, passReason: 'No Bet - Too Close' },
+        { label: 'B', isPass: true, passReason: 'No Bet - Too Close' }
+      ];
+    } else if (worthwhile.length === 0) {
+      scenario = `Positive EV Only on Thin-Margin Favorites — payout under ${MIN_PAYOUT_RATIO}x the stake`;
+      optionRows = [
+        { label: 'A', isPass: true, passReason: 'No Bet - Low Payout' },
+        { label: 'B', isPass: true, passReason: 'No Bet - Low Payout' }
+      ];
+    } else {
+      let byEv = worthwhile.slice().sort((a, b) => b.evPerDollar - a.evPerDollar);
+      let best = byEv[0];
+      let byHitRate = worthwhile.slice().sort((a, b) => b.hitProb - a.hitProb).find(c => c.type !== best.type) || byEv[1];
+
+      scenario = `Value Pick: ${best.type.replace('_', ' ')} (EV/$ = +${(best.evPerDollar * 100).toFixed(0)}%)` +
+        (byHitRate ? ` | Safety Pick: ${byHitRate.type.replace('_', ' ')} (${(byHitRate.hitProb * 100).toFixed(0)}% modeled hit rate)` : '');
+
+      optionRows = [
+        { label: 'A', isPass: false, stake: best.cost, typeLabel: best.typeLabel, horses: best.horses, payoutLow: best.payoutLow, payoutHigh: best.payoutHigh, hitProb: best.hitProb, isRealData: best.isRealData },
+        byHitRate
+          ? { label: 'B', isPass: false, stake: byHitRate.cost, typeLabel: byHitRate.typeLabel, horses: byHitRate.horses, payoutLow: byHitRate.payoutLow, payoutHigh: byHitRate.payoutHigh, hitProb: byHitRate.hitProb, isRealData: byHitRate.isRealData }
+          : { label: 'B', isPass: true, passReason: 'No Bet - Low Payout' }
+      ];
     }
 
     return {
       ruleAppliedMsg,
       leaderboard: runners,
       gaps: { gap12, gap23, gap34, gap45, gap13, gap14 },
-      wagerRecs: { scenario, optionA, optionB, optionC }
+      wagerRecs: { scenario, optionRows },
+      wetnessTier,
+      trackConditionRaw: cachedTrackCondition
     };
   }
 
@@ -1051,9 +1840,9 @@
     let top5 = leaderboard.slice(0, 5);
     if (!top5 || top5.length === 0) {
       return `
-        <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #f59e0b;">
-          <div style="color:#f59e0b;font-weight:bold;margin-bottom:6px;font-size:11px;">COMMENTS</div>
-          <div style="color:#9ca3af;font-size:10px;">Awaiting Runner Data...</div>
+        <div class="ts-panel">
+          <div class="ts-panel-title" style="color:var(--ts-orange);">Comments</div>
+          <div class="ts-muted">Awaiting Runner Data...</div>
         </div>
       `;
     }
@@ -1064,19 +1853,102 @@
       let negStr = h.COMMENTS_NEG ? h.COMMENTS_NEG.replace(/^"|"$/g, '').trim() : '';
 
       return `
-        <div style="margin-bottom:6px;padding-bottom:6px;border-bottom:1px dashed #334155;">
-          <div style="color:#fbbf24;font-weight:bold;font-size:10px;margin-bottom:2px;">#${h.PROGRAM} ${nameStr}</div>
-          <div style="color:#34d399;font-size:9.5px;margin-bottom:1px;"><b>(+) Pos:</b> ${posStr || 'None'}</div>
-          <div style="color:#f87171;font-size:9.5px;"><b>(-) Neg:</b> ${negStr || 'None'}</div>
+        <div style="margin-bottom:6px;padding-bottom:6px;border-bottom:1px dashed var(--ts-border);">
+          <div style="color:var(--ts-yellow);font-weight:700;font-size:11.5px;margin-bottom:2px;">#${h.PROGRAM} ${nameStr}</div>
+          <div style="color:var(--ts-green);font-size:11px;margin-bottom:1px;"><b>(+) Pos:</b> ${posStr || 'None'}</div>
+          <div style="color:var(--ts-red);font-size:11px;"><b>(-) Neg:</b> ${negStr || 'None'}</div>
         </div>
       `;
     }).join('');
 
     return `
-      <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #f59e0b;">
-        <div style="color:#f59e0b;font-weight:bold;margin-bottom:6px;font-size:11px;">COMMENTS</div>
-        <div style="background:#0f172a;padding:8px;border-radius:4px;max-height:180px;overflow-y:auto;">
+      <div class="ts-panel">
+        <div class="ts-panel-title" style="color:var(--ts-orange);">Comments</div>
+        <div class="ts-code-block" style="max-height:180px;">
           ${contentHtml}
+        </div>
+      </div>
+    `;
+  }
+
+  // TEMPORARY — see dualWeightTestMode. Builds a compact side-by-side comparison of the top 3
+  // picks under Thoroughbred (default) vs Special weights, plus a pipe-delimited export line for
+  // each, so results can be logged and compared against actual finishes at any track.
+  function getWeightComparisonSectionHtml(modelResDefault, modelResSpecial) {
+    let rawPostTime = getActivePostTime();
+    let { dateStr, timeStr } = parseExportDateTime(rawPostTime);
+    let trackName = getActiveTrackName().replace(/"/g, '');
+    let raceNum = getActiveRaceNum();
+
+    function top3Row(modelRes, weightLabel) {
+      let top1 = modelRes.leaderboard[0], top2 = modelRes.leaderboard[1], top3 = modelRes.leaderboard[2];
+      let p1 = top1 ? `#${top1.PROGRAM}` : 'N/A', s1 = top1 ? top1.FINAL_SCORE.toFixed(2) : 'N/A';
+      let p2 = top2 ? `#${top2.PROGRAM}` : 'N/A', s2 = top2 ? top2.FINAL_SCORE.toFixed(2) : 'N/A';
+      let p3 = top3 ? `#${top3.PROGRAM}` : 'N/A', s3 = top3 ? top3.FINAL_SCORE.toFixed(2) : 'N/A';
+      let pipeString = `${dateStr}|${timeStr}|${trackName}|${raceNum}|${weightLabel}|${p1}|${s1}|${p2}|${s2}|${p3}|${s3}`;
+      return { p1, s1, p2, s2, p3, s3, pipeString };
+    }
+
+    let def = top3Row(modelResDefault, 'Thoroughbred');
+    let spec = top3Row(modelResSpecial, 'Special');
+
+    return `
+      <div class="ts-panel" style="border-color:var(--ts-yellow);">
+        <div class="ts-row-flex" style="margin-bottom:6px;">
+          <div class="ts-panel-title" style="color:var(--ts-yellow);margin-bottom:0;">⚖️ Weight Comparison (Temporary Backtesting)</div>
+          <div class="ts-muted" style="font-size:10px;">Thoroughbred vs Special</div>
+        </div>
+        <div class="ts-table-wrap">
+          <table class="ts-table ts-table-scroll">
+            <thead><tr><th>Weight Set</th><th>1st</th><th>2nd</th><th>3rd</th></tr></thead>
+            <tbody>
+              <tr><td>Thoroughbred</td><td class="ts-num">${def.p1} (${def.s1})</td><td class="ts-num">${def.p2} (${def.s2})</td><td class="ts-num">${def.p3} (${def.s3})</td></tr>
+              <tr><td>Special</td><td class="ts-num">${spec.p1} (${spec.s1})</td><td class="ts-num">${spec.p2} (${spec.s2})</td><td class="ts-num">${spec.p3} (${spec.s3})</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="ts-muted" style="font-size:10px;margin:6px 0 2px;">Export — Thoroughbred:</div>
+        <div class="ts-code-block" style="color:var(--ts-fg);word-break:break-all;user-select:all;font-size:10.5px;">${def.pipeString}</div>
+        <div class="ts-muted" style="font-size:10px;margin:6px 0 2px;">Export — Special:</div>
+        <div class="ts-code-block" style="color:var(--ts-fg);word-break:break-all;user-select:all;font-size:10.5px;">${spec.pipeString}</div>
+      </div>
+    `;
+  }
+
+  function getTestingExportSectionHtml(modelRes) {
+    let rawPostTime = getActivePostTime();
+    let { dateStr, timeStr } = parseExportDateTime(rawPostTime);
+
+    let trackName = getActiveTrackName().replace(/"/g, '');
+    let raceNum = getActiveRaceNum();
+    let breed = cachedBreed || "Thoroughbred";
+
+    let top1 = modelRes.leaderboard[0];
+    let top2 = modelRes.leaderboard[1];
+    let top3 = modelRes.leaderboard[2];
+
+    let p1 = top1 ? `#${top1.PROGRAM}` : 'N/A';
+    let s1 = top1 ? top1.FINAL_SCORE.toFixed(2) : 'N/A';
+
+    let p2 = top2 ? `#${top2.PROGRAM}` : 'N/A';
+    let s2 = top2 ? top2.FINAL_SCORE.toFixed(2) : 'N/A';
+
+    let p3 = top3 ? `#${top3.PROGRAM}` : 'N/A';
+    let s3 = top3 ? top3.FINAL_SCORE.toFixed(2) : 'N/A';
+
+    let pipeString = `${dateStr}|${timeStr}|${trackName}|${raceNum}|${breed}|${p1}|${s1}|${p2}|${s2}|${p3}|${s3}`;
+
+    return `
+      <div class="ts-panel">
+        <div class="ts-row-flex" style="margin-bottom:6px;">
+          <div class="ts-panel-title" style="color:var(--ts-purple);margin-bottom:0;">🧪 Testing Export Data (Pipe Delimited)</div>
+          <div class="ts-muted" style="font-size:10px;">Excel / Text-to-Columns Ready</div>
+        </div>
+        <div class="ts-code-block" style="color:var(--ts-fg);word-break:break-all;user-select:all;border:1px solid var(--ts-purple);">
+          ${pipeString}
+        </div>
+        <div class="ts-muted ts-italic" style="font-size:10px;margin-top:4px;">
+          Format: [Date]|[Post Time]|[Track]|[Race #]|[Breed]|[1st #]|[1st Score]|[2nd #]|[2nd Score]|[3rd #]|[3rd Score]
         </div>
       </div>
     `;
@@ -1087,8 +1959,11 @@
 
     let progress = getLoadingProgress();
     let isDataComplete = progress.percent === 100;
+    // Only start tracking the fingerprint once tabs report done — before that, of course things
+    // are still changing, so there's nothing meaningful to compare yet.
+    let fieldsStable = isDataComplete ? checkFieldStability() : false;
 
-    if (isDataComplete && !isCalculating && calcProgressPercent === 0) {
+    if (isDataComplete && fieldsStable && !isCalculating && calcProgressPercent === 0) {
       if (collectionTicker) {
         clearInterval(collectionTicker);
         collectionTicker = null;
@@ -1111,24 +1986,38 @@
     if (isCalculating) {
       let secondsLeft = Math.max(0, (16 - (calcProgressPercent * 0.16))).toFixed(1);
       return `
-        <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #3b82f6;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-            <div style="color:#60a5fa;font-weight:bold;font-size:11px;">⚙️ MODEL CALCULATIONS IN PROGRESS</div>
-            <div style="color:#93c5fd;font-weight:bold;font-size:10px;">${Math.round(calcProgressPercent)}%</div>
+        <div class="ts-panel">
+          <div class="ts-row-flex" style="margin-bottom:6px;">
+            <div style="color:var(--ts-cyan);font-weight:700;font-size:11.5px;">⚙️ Model Calculations In Progress</div>
+            <div style="color:var(--ts-cyan);font-weight:700;font-size:10.5px;">${Math.round(calcProgressPercent)}%</div>
           </div>
-          
-          <div style="color:#cbd5e1;font-size:10px;margin-bottom:12px;line-height:1.3;">
+
+          <div class="ts-muted" style="font-size:10.5px;margin-bottom:12px;">
             Please allow a moment for calculations...
           </div>
 
-          <div style="position:relative;margin-top:22px;background:#0f172a;border-radius:8px;padding:3px;border:1px solid #334155;">
+          <div style="position:relative;margin-top:22px;background:var(--ts-bg-code);border-radius:8px;padding:3px;border:1px solid var(--ts-border-soft);">
             <div style="position:absolute;top:-20px;left:${calcProgressPercent}%;transform:translateX(-50%) scaleX(-1);font-size:16px;line-height:1;pointer-events:none;transition:left 0.1s linear;">
               🏇
             </div>
-            <div style="width:${calcProgressPercent}%;background:linear-gradient(90deg, #3b82f6 0%, #8b5cf6 50%, #ec4899 100%);height:10px;border-radius:6px;transition:width 0.1s linear;"></div>
+            <div style="width:${calcProgressPercent}%;background:linear-gradient(90deg, var(--ts-purple) 0%, var(--ts-pink) 50%, var(--ts-cyan) 100%);height:10px;border-radius:6px;transition:width 0.1s linear;"></div>
           </div>
-          <div style="text-align:right;color:#9ca3af;font-size:9px;margin-top:4px;">
+          <div class="ts-muted" style="text-align:right;font-size:10px;margin-top:4px;">
             ${secondsLeft}s remaining
+          </div>
+        </div>
+      `;
+    }
+
+    if (isDataComplete && !fieldsStable) {
+      let secsIntoWindow = fieldStableSince ? (Date.now() - fieldStableSince) / 1000 : 0;
+      let secsRemaining = Math.max(0, (FIELD_STABILITY_WINDOW_MS / 1000) - secsIntoWindow).toFixed(1);
+      return `
+        <div class="ts-panel">
+          <div style="color:var(--ts-yellow);font-weight:700;font-size:11.5px;margin-bottom:6px;">🔄 Confirming Data Stability</div>
+          <div class="ts-muted" style="font-size:10.5px;">
+            All tabs loaded, but individual horse data is still arriving in the background.
+            Waiting for it to settle before finalizing (${secsRemaining}s)...
           </div>
         </div>
       `;
@@ -1139,25 +2028,25 @@
 
     let tabListHtml = REQUIRED_TABS.map(tab => {
       let isLoaded = loadedTabs[tab];
-      let color = isLoaded ? '#34d399' : '#f87171';
+      let color = isLoaded ? 'var(--ts-green)' : 'var(--ts-red)';
       let icon = isLoaded ? '🟢' : '🔴';
       let statusText = isLoaded ? 'LOADED' : (tab === 'Comments' ? `AWAITING DATA (${timeRemaining}s TIMEOUT)` : 'CLICK TAB ON PAGE');
       return `
-        <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:#0f172a;border-radius:4px;margin-bottom:4px;border:1px solid ${isLoaded ? '#059669' : '#991b1b'};">
-          <span style="color:#ffffff;font-weight:bold;font-size:10px;">${icon} ${tab}</span>
-          <span style="color:${color};font-weight:bold;font-size:9px;">${statusText}</span>
+        <div class="ts-row-flex" style="padding:5px 8px;background:var(--ts-bg-code);border-radius:6px;margin-bottom:4px;border:1px solid ${isLoaded ? 'var(--ts-green)' : 'var(--ts-red)'};">
+          <span style="font-weight:700;font-size:11px;">${icon} ${tab}</span>
+          <span style="color:${color};font-weight:700;font-size:10px;">${statusText}</span>
         </div>
       `;
     }).join('');
 
     return `
-      <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #ef4444;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-          <div style="color:#fbbf24;font-weight:bold;font-size:11px;">⏳ DATA COLLECTION STATUS</div>
-          <div style="color:#f87171;font-weight:bold;font-size:10px;">${progress.percent}% COMPLETE</div>
+      <div class="ts-panel">
+        <div class="ts-row-flex" style="margin-bottom:6px;">
+          <div style="color:var(--ts-yellow);font-weight:700;font-size:11.5px;">⏳ Data Collection Status</div>
+          <div style="color:var(--ts-red);font-weight:700;font-size:10.5px;">${progress.percent}% COMPLETE</div>
         </div>
-        
-        <div style="color:#cbd5e1;font-size:10px;margin-bottom:8px;line-height:1.3;">
+
+        <div class="ts-muted" style="font-size:10.5px;margin-bottom:8px;">
           Loading data... click each program tab to help me find data:
         </div>
 
@@ -1165,13 +2054,13 @@
           ${tabListHtml}
         </div>
 
-        <div style="position:relative;margin-top:22px;background:#0f172a;border-radius:8px;padding:3px;border:1px solid #334155;">
+        <div style="position:relative;margin-top:22px;background:var(--ts-bg-code);border-radius:8px;padding:3px;border:1px solid var(--ts-border-soft);">
           <div style="position:absolute;top:-20px;left:${progress.percent}%;transform:translateX(-50%) scaleX(-1);font-size:16px;line-height:1;pointer-events:none;transition:left 0.3s ease;">
             🏇
           </div>
-          <div style="width:${progress.percent}%;background:linear-gradient(90deg, #ef4444 0%, #f59e0b 50%, #10b981 100%);height:10px;border-radius:6px;transition:width 0.3s ease;"></div>
+          <div style="width:${progress.percent}%;background:linear-gradient(90deg, var(--ts-red) 0%, var(--ts-yellow) 50%, var(--ts-green) 100%);height:10px;border-radius:6px;transition:width 0.3s ease;"></div>
         </div>
-        <div style="text-align:right;color:#9ca3af;font-size:9px;margin-top:3px;">
+        <div class="ts-muted" style="text-align:right;font-size:10px;margin-top:3px;">
           ${progress.completed} of ${progress.total} Items Collected
         </div>
       </div>
@@ -1179,13 +2068,21 @@
   }
 
   function updateOverlay() {
+    applyOverlayThemeCSS();
     renderToggleButton();
 
     let existing = document.getElementById('ts-model-overlay');
     if (!existing) {
       existing = document.createElement('div');
       existing.id = 'ts-model-overlay';
-      existing.style.cssText = 'position:fixed;top:40px;left:10px;z-index:999999;background:#111827;color:#ffffff;padding:16px;border-radius:8px;box-shadow:0 10px 25px rgba(0,0,0,0.5);font-family:monospace;min-width:320px;max-width:92vw;max-height:85vh;overflow-y:auto;border:2px solid #3b82f6;font-size:11px;transform-origin:top left;';
+      // Centered starting position (rough estimate of final size — exact isn't critical, this is
+      // just where it first appears; dragging afterward works exactly as before via the same
+      // pixel-based left/top positioning).
+      let estWidth = Math.min(400, window.innerWidth * 0.92);
+      let estHeight = Math.min(window.innerHeight * 0.85, 600);
+      let centeredLeft = Math.max(10, (window.innerWidth - estWidth) / 2);
+      let centeredTop = Math.max(20, (window.innerHeight - estHeight) / 2);
+      existing.style.cssText = `position:fixed;top:${centeredTop}px;left:${centeredLeft}px;z-index:999999;padding:16px;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.5);width:min(400px, 92vw);min-width:280px;max-height:85vh;overflow-y:auto;border:2px solid #bd93f9;transform-origin:top left;`;
       document.body.appendChild(existing);
     }
 
@@ -1200,63 +2097,178 @@
 
     let modelRes = calculateModelOutput();
 
-    let leaderboardHtml = modelRes.leaderboard.map(h => {
+    let leaderboardRowsHtml = modelRes.leaderboard.map(h => {
       let nameStr = h.HORSE_NAME.replace(/"/g, '');
-      let pwrBonusStr = h.POWER_BONUS > 0 ? ` + Pwr: ${h.POWER_BONUS.toFixed(2)}` : '';
-      let scratchedTag = (h.IS_SCRATCHED || cachedScratchedMap[h.PROGRAM]) ? ' [SCRATCHED]' : '';
-      return `R${h.RANK} | #${h.PROGRAM} ${nameStr}${scratchedTag} | Final: ${h.FINAL_SCORE.toFixed(2)} = Base: ${h.BASE_SKILL.toFixed(2)} + Post: ${h.POST_BONUS.toFixed(2)} + Style: ${h.STYLE_BONUS.toFixed(2)}${pwrBonusStr}`;
-    }).join('\n');
+      let isScratched = h.IS_SCRATCHED || cachedScratchedMap[h.PROGRAM];
+      let pwrCellStyle = h.POWER_BONUS > 0 ? 'color:var(--ts-green);' : '';
+      let wetCellStyle = h.WET_BONUS > 0 ? 'color:var(--ts-green);' : '';
 
-    let gapHtml = modelRes.leaderboard.slice(0, 5).map((h, i, arr) => {
+      // Time-based persistence: a detected change stays highlighted for CHANGE_INDICATOR_DURATION_MS
+      // regardless of how often the page re-renders in between (previously the comparison baseline
+      // updated on every render, so an arrow only ever survived a single render cycle).
+      let now = Date.now();
+      if (!isLoaderVisible) {
+        let tracked = previousRankScoreMap[h.PROGRAM];
+        if (!tracked) {
+          previousRankScoreMap[h.PROGRAM] = { rank: h.RANK, score: h.FINAL_SCORE, rankChangedAt: null, rankDir: null, scoreChangedAt: null, scoreDir: null };
+        } else {
+          if (h.RANK !== tracked.rank) {
+            tracked.rankDir = h.RANK < tracked.rank ? 'up' : 'down';
+            tracked.rankChangedAt = now;
+            tracked.rank = h.RANK;
+          }
+          if (h.FINAL_SCORE !== tracked.score) {
+            tracked.scoreDir = h.FINAL_SCORE > tracked.score ? 'up' : 'down';
+            tracked.scoreChangedAt = now;
+            tracked.score = h.FINAL_SCORE;
+          }
+        }
+      }
+
+      let tracked = previousRankScoreMap[h.PROGRAM];
+      let rankArrow = '', rankStyle = '';
+      if (tracked && tracked.rankChangedAt && (now - tracked.rankChangedAt) < CHANGE_INDICATOR_DURATION_MS) {
+        rankArrow = tracked.rankDir === 'up' ? '▲' : '▼';
+        rankStyle = tracked.rankDir === 'up' ? 'color:var(--ts-green);font-weight:700;' : 'color:var(--ts-red);font-weight:700;';
+      }
+      let scoreArrow = '', scoreStyle = '';
+      if (tracked && tracked.scoreChangedAt && (now - tracked.scoreChangedAt) < CHANGE_INDICATOR_DURATION_MS) {
+        scoreArrow = tracked.scoreDir === 'up' ? '▲' : '▼';
+        scoreStyle = tracked.scoreDir === 'up' ? 'color:var(--ts-green);font-weight:700;' : 'color:var(--ts-red);font-weight:700;';
+      }
+
+      return `
+        <tr class="${isScratched ? 'ts-scratched' : ''}">
+          <td class="ts-num" style="${rankStyle}">${rankArrow}${h.RANK}</td>
+          <td class="ts-num">#${h.PROGRAM}</td>
+          <td class="ts-horse-cell"><span class="ts-horse-name">${nameStr}</span>${isScratched ? '<span class="ts-badge ts-badge-scratched">SCR</span>' : ''}</td>
+          <td class="ts-num" style="${scoreStyle}">${scoreArrow}${h.FINAL_SCORE.toFixed(2)}</td>
+          <td class="ts-num ts-muted">${h.BASE_SKILL.toFixed(2)}</td>
+          <td class="ts-num ts-muted">${h.POST_BONUS.toFixed(2)}</td>
+          <td class="ts-num ts-muted">${h.STYLE_BONUS.toFixed(2)}</td>
+          <td class="ts-num${pwrCellStyle ? '' : ' ts-muted'}" style="${pwrCellStyle}">${(h.POWER_BONUS || 0).toFixed(2)}</td>
+          <td class="ts-num${wetCellStyle ? '' : ' ts-muted'}" style="${wetCellStyle}">${(h.WET_BONUS || 0).toFixed(2)}</td>
+        </tr>`;
+    }).join('');
+
+    let leaderboardTableHtml = modelRes.leaderboard.length === 0
+      ? `<div class="ts-muted">Awaiting Field Calculation...</div>`
+      : `
+        <div class="ts-table-wrap">
+          <table class="ts-table ts-table-scroll">
+            <thead><tr>
+              <th>Rk</th><th>#</th><th>Horse</th><th>Final</th><th>Base</th><th>Post</th><th>Style</th><th>Bonus</th><th>Wet Bonus</th>
+            </tr></thead>
+            <tbody>${leaderboardRowsHtml}</tbody>
+          </table>
+        </div>
+      `;
+
+    let gapRowsHtml = modelRes.leaderboard.slice(0, 5).map((h, i, arr) => {
       let nameStr = h.HORSE_NAME.replace(/"/g, '');
-      let gapStr = i === 0 
-        ? "(Leader)" 
-        : `(Gap to Rank ${i}: -${(arr[i - 1].FINAL_SCORE - h.FINAL_SCORE).toFixed(2)})`;
-      return `  Rank ${i+1}: #${h.PROGRAM} ${nameStr} — Score: ${h.FINAL_SCORE.toFixed(2)} ${gapStr}`;
-    }).join('\n');
+      let gapStr = i === 0 ? '—' : `-${(arr[i - 1].FINAL_SCORE - h.FINAL_SCORE).toFixed(2)}`;
+      return `
+        <tr>
+          <td class="ts-num">${i + 1}</td>
+          <td class="ts-num">#${h.PROGRAM}</td>
+          <td class="ts-horse-cell">${nameStr}</td>
+          <td class="ts-num">${h.FINAL_SCORE.toFixed(2)}</td>
+          <td class="ts-num ts-muted">${gapStr}</td>
+        </tr>`;
+    }).join('');
+
+    let gapTableHtml = modelRes.leaderboard.length === 0
+      ? `<div class="ts-muted">N/A</div>`
+      : `
+        <div class="ts-table-wrap">
+          <table class="ts-table ts-table-scroll">
+            <thead><tr><th>Rk</th><th>#</th><th>Horse</th><th>Score</th><th>Gap</th></tr></thead>
+            <tbody>${gapRowsHtml}</tbody>
+          </table>
+        </div>
+      `;
 
     existing.innerHTML = `
-      <div style="border-bottom:2px solid #3b82f6;padding-bottom:8px;margin-bottom:12px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;color:#60a5fa;font-weight:bold;font-size:12px;">
+      <div style="border-bottom:2px solid var(--ts-border-accent);padding-bottom:8px;margin-bottom:12px;">
+        <div class="ts-row-flex" style="margin-bottom:8px;color:var(--ts-cyan);font-weight:700;font-size:14px;">
           <span>📍 ${trackDisplay} — RACE #${raceDisplay}${condTag}</span>
-          <span style="color:#9ca3af;font-size:10px;">📅 ${currentDate}</span>
+          <span class="ts-muted" style="font-size:11.5px;">📅 ${currentDate}</span>
         </div>
 
-        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
-          <button id="ts-drag-handle" title="Click and drag to move panel" style="flex:1;background:#374151;color:#fbbf24;border:1px solid #4b5563;border-radius:4px;padding:4px 6px;cursor:move;font-weight:bold;font-size:10px;">✋ MOVE</button>
-          <button id="ts-refresh-btn" title="Clear Cache & Reset Race" style="flex:1;background:#2563eb;color:#ffffff;border:1px solid #3b82f6;border-radius:4px;padding:4px 6px;cursor:pointer;font-weight:bold;font-size:10px;">🔄 RESET</button>
-          <div style="flex:1.5;display:flex;align-items:center;gap:4px;background:#1f2937;padding:3px 6px;border-radius:4px;border:1px solid #374151;">
-            <span style="color:#9ca3af;font-size:9px;font-weight:bold;">ZOOM</span>
-            <input type="range" id="ts-zoom-slider" min="50" max="200" value="${Math.round(currentZoom * 100)}" style="width:100%;cursor:pointer;accent-color:#3b82f6;">
-            <span id="ts-zoom-label" style="color:#60a5fa;font-size:9px;font-weight:bold;min-width:30px;text-align:right;">${Math.round(currentZoom * 100)}%</span>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+          <button id="ts-drag-handle" title="Click and drag to move panel" class="ts-btn ts-btn-move" style="flex:1;">✋ MOVE</button>
+          <button id="ts-refresh-btn" title="Clear Cache & Reset Race" class="ts-btn ts-btn-reset" style="flex:1;">🔄 RESET</button>
+          <div style="flex:1.8;display:flex;align-items:center;gap:6px;background:var(--ts-bg-code);padding:4px 8px;border-radius:6px;border:1px solid var(--ts-border-soft);">
+            <span class="ts-muted" style="font-size:10.5px;font-weight:700;">ZOOM</span>
+            <input type="range" id="ts-zoom-slider" min="50" max="200" value="${Math.round(currentZoom * 100)}" style="width:100%;cursor:pointer;accent-color:var(--ts-purple);">
+            <span id="ts-zoom-label" style="color:var(--ts-cyan);font-size:10.5px;font-weight:700;min-width:36px;text-align:right;">${Math.round(currentZoom * 100)}%</span>
           </div>
         </div>
 
-        <div style="color:#9ca3af;font-size:10px;text-align:center;background:#1f2937;padding:4px;border-radius:4px;border:1px solid #374151;">
-          <span style="color:#34d399;font-weight:bold;">${activeStartersCount}</span> Active Starters &nbsp;|&nbsp; <span style="color:#f87171;font-weight:bold;">${scratchedHorsesCount}</span> Scratched
+        <div style="display:flex;align-items:center;gap:8px;">
+          <div class="ts-status-pill" style="flex:1;">
+            <span style="color:var(--ts-green);font-weight:700;">${activeStartersCount}</span> Active Starters &nbsp;|&nbsp; <span style="color:var(--ts-red);font-weight:700;">${scratchedHorsesCount}</span> Scratched
+          </div>
+          ${cachedBreed === 'Thoroughbred' ? `
+          <label class="ts-toggle-row" title="Compare Thoroughbred vs Special weights for this race — for researching whether a track might benefit from a stronger live-odds weight">
+            <span class="ts-toggle-switch">
+              <input type="checkbox" id="ts-weight-compare-toggle" ${dualWeightTestMode ? 'checked' : ''}>
+              <span class="ts-toggle-slider"></span>
+            </span>
+            Wt Compare
+          </label>
+          ` : ''}
         </div>
       </div>
 
       ${getLoaderSectionHtml()}
 
-      <div style="background:#1e293b;padding:10px;border-radius:6px;margin-bottom:14px;border:1px solid #475569;">
-        <div style="color:#f59e0b;font-weight:bold;margin-bottom:4px;font-size:11px;">Little John's Top Picks</div>
-        <div style="color:#a7f3d0;font-style:italic;margin-bottom:8px;font-size:10px;">${modelRes.ruleAppliedMsg}</div>
+      ${isLoaderVisible ? `
+      <div class="ts-panel">
+        <div class="ts-panel-title">Little John's Top Picks</div>
+        <div class="ts-muted">⏳ Finalizing calculations — rankings, scores, and wager recommendations will appear once complete, so you're not betting on numbers that are still settling.</div>
+      </div>
+      ` : `
+      <div class="ts-panel">
+        <div class="ts-panel-title">Little John's Top Picks</div>
+        <div class="ts-italic ts-muted" style="margin-bottom:8px;">${modelRes.ruleAppliedMsg}</div>
 
-        <div style="color:#f32424;font-weight:bold;margin-bottom:2px;font-size:10px;">--- RANKED LEADERBOARD ---</div>
-        <div style="background:#0f172a;padding:6px;border-radius:4px;white-space:pre-wrap;margin-bottom:8px;color:#e2e8f0;max-height:160px;overflow-y:auto;font-size:9.5px;">${leaderboardHtml || 'Awaiting Field Calculation...'}</div>
+        <div class="ts-section-label">Ranked Leaderboard</div>
+        ${leaderboardTableHtml}
 
-        <div style="color:#f32424;font-weight:bold;margin-bottom:2px;font-size:10px;">--- TOP 5 DISTRIBUTION & GAPS ---</div>
-        <div style="background:#0f172a;padding:6px;border-radius:4px;white-space:pre-wrap;margin-bottom:8px;color:#cbd5e1;font-size:9.5px;">${gapHtml || 'N/A'}</div>
+        <div class="ts-section-label">Top 5 Distribution &amp; Gaps</div>
+        ${gapTableHtml}
 
-        <div style="color:#f59e0b;font-weight:bold;margin-bottom:2px;font-size:10px;">--- WAGER RECOMMENDATIONS ---</div>
-        <div style="background:#0f172a;padding:6px;border-radius:4px;color:#38bdf8;font-size:9.5px;">
-          <b>Scenario:</b> ${modelRes.wagerRecs.scenario}<br/><br/>
-          <b>OPTION A (Primary Wager):</b><br/> ${modelRes.wagerRecs.optionA}<br/><br/>
-          <b>OPTION B (Secondary / Exotic):</b><br/> ${modelRes.wagerRecs.optionB}
-          ${modelRes.wagerRecs.optionC ? `<br/><br/><b>OPTION C (Churchill Special):</b><br/> ${modelRes.wagerRecs.optionC}` : ''}
+        <div class="ts-section-label">Wager Recommendations</div>
+        <div class="ts-italic ts-muted" style="margin-bottom:6px;">${modelRes.wagerRecs.scenario}</div>
+        <div class="ts-table-wrap">
+          <table class="ts-table ts-table-scroll">
+            <thead><tr>
+              <th>Option</th><th>$</th><th>Type</th><th>#</th><th>Payout</th><th>Hit %</th>
+            </tr></thead>
+            <tbody>
+              ${modelRes.wagerRecs.optionRows.map(o => o.isPass ? `
+                <tr>
+                  <td>${o.label}</td>
+                  <td class="ts-num ts-muted">—</td>
+                  <td class="ts-muted" colspan="4">${o.passReason}</td>
+                </tr>` : `
+                <tr>
+                  <td>${o.label}</td>
+                  <td class="ts-num">$${o.stake}</td>
+                  <td style="white-space:nowrap;">${o.typeLabel}</td>
+                  <td style="white-space:nowrap;">${o.horses}</td>
+                  <td class="ts-num" style="white-space:nowrap;">${o.payoutLow.toFixed(2) === o.payoutHigh.toFixed(2) ? '$' + o.payoutLow.toFixed(2) : '$' + o.payoutLow.toFixed(2) + '–$' + o.payoutHigh.toFixed(2)}</td>
+                  <td class="ts-num">${(o.hitProb * 100).toFixed(0)}%</td>
+                </tr>`
+              ).join('')}
+            </tbody>
+          </table>
         </div>
       </div>
+
+      ${dualWeightTestMode && cachedBreed === 'Thoroughbred' ? getWeightComparisonSectionHtml(calculateModelOutput('Thoroughbred'), calculateModelOutput('Special')) : ''}
+      `}
 
       ${getCommentsSectionHtml(modelRes.leaderboard)}
     `;
@@ -1318,6 +2330,29 @@
         cachedStatsCsv = `${statsHeader}\n${statRows.map(r => Object.values(r).join(',')).join('\n')}`;
         updateOverlay();
       }
+
+      let exoticsPayload = findExoticsPayload(data);
+      if (exoticsPayload) {
+        let parsed = parseExoticsGrid(exoticsPayload);
+        cachedExactaGrid = parsed.grid;
+        cachedExactaPoolTotal = parsed.poolTotal;
+        cachedExactaBaseUnit = parsed.baseUnit;
+        loadedTabs['Probables'] = true;
+        updateOverlay();
+      }
+
+      let poolsPayload = findPoolsPayload(data);
+      if (poolsPayload) {
+        let parsedPools = parsePoolsPayload(poolsPayload);
+        cachedPoolsMap = parsedPools.poolsMap;
+        cachedWinPoolTotal = parsedPools.winTotal;
+        cachedPlacePoolTotal = parsedPools.placeTotal;
+        cachedShowPoolTotal = parsedPools.showTotal;
+        cachedShowPoolAvailable = parsedPools.showAvailable;
+        cachedPoolsWasPercentMode = parsedPools.detectedPercentMode;
+        loadedTabs['Pools'] = true;
+        updateOverlay();
+      }
     } catch(e) {}
   }
 
@@ -1343,6 +2378,7 @@
   }
 
   startCollectionTicker();
+  applyOverlayThemeCSS();
   updateOverlay();
   console.log("Live Mobile Handicapping Model V2 Running");
 })();
