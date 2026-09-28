@@ -1,5 +1,4 @@
 // ==UserScript==
-// ==UserScript==
 // @name         TwinSpires Mobile Handicapper
 // @namespace    http://tampermonkey.net/
 // @version      1.2
@@ -14,6 +13,18 @@
   let isDragging = false;
   let dragOffsetX = 0;
   let dragOffsetY = 0;
+
+  // Request-ordering protection: a slow-resolving OLDER request can complete after a newer one
+  // to the SAME endpoint already landed, silently reverting fresh data back to stale data (a likely
+  // cause of numbers flip-flopping for minutes with no imputation/averaging explanation). Sequenced
+  // by when each request was SENT (not when it resolves), and scoped per-endpoint (URL path only,
+  // stripped of query string) so it never discards a genuinely different data type's response --
+  // only a stale duplicate of the SAME endpoint.
+  let requestSeqCounter = 0;
+  let lastSeqByUrlPattern = {};
+  function getUrlPattern(url) {
+    return String(url || '').split('?')[0];
+  }
   let isOverlayVisible = true;
 
   // Embedded Horse Image URL / Base64 Data String
@@ -2294,7 +2305,12 @@
     applyZoom();
   }
 
-  function processResponse(url, text) {
+  function processResponse(url, text, seq) {
+    if (seq !== undefined) {
+      let pattern = getUrlPattern(url);
+      if (lastSeqByUrlPattern[pattern] !== undefined && seq < lastSeqByUrlPattern[pattern]) return; // stale, superseded
+      lastSeqByUrlPattern[pattern] = seq;
+    }
     if (!text || (text.trim().charAt(0) !== '{' && text.trim().charAt(0) !== '[')) return;
     try {
       let data = JSON.parse(text);
@@ -2376,8 +2392,9 @@
 
   const origOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url) {
+    let seq = ++requestSeqCounter;
     this.addEventListener('load', function() {
-      processResponse(url, this.responseText);
+      processResponse(url, this.responseText, seq);
     });
     origOpen.apply(this, arguments);
   };
@@ -2385,11 +2402,12 @@
   const origFetch = window.fetch;
   if (origFetch) {
     window.fetch = async function(...args) {
+      let seq = ++requestSeqCounter;
       let response = await origFetch.apply(this, args);
       try {
         let clone = response.clone();
         let url = typeof args[0] === 'string' ? args[0] : (args[0] ? args[0].url : '');
-        clone.text().then(text => processResponse(url, text));
+        clone.text().then(text => processResponse(url, text, seq));
       } catch(e) {}
       return response;
     };
