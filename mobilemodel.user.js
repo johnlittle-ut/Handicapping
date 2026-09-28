@@ -161,6 +161,23 @@
       }
       #ts-model-overlay .ts-toggle-switch input:checked + .ts-toggle-slider { background: var(--ts-yellow); }
       #ts-model-overlay .ts-toggle-switch input:checked + .ts-toggle-slider::before { transform: translateX(14px); background: #282a36; }
+
+      /* Zoom slider — larger track and thumb than the browser default, sized for touch rather
+         than mouse precision. The row this sits in gives it full width (see updateOverlay). */
+      #ts-model-overlay #ts-zoom-slider {
+        -webkit-appearance: none; appearance: none;
+        height: 6px; border-radius: 3px; background: var(--ts-border-soft); outline: none;
+      }
+      #ts-model-overlay #ts-zoom-slider::-webkit-slider-thumb {
+        -webkit-appearance: none; appearance: none;
+        width: 26px; height: 26px; border-radius: 50%;
+        background: var(--ts-purple); border: 2px solid var(--ts-fg);
+        cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+      }
+      #ts-model-overlay #ts-zoom-slider::-moz-range-thumb {
+        width: 26px; height: 26px; border-radius: 50%; border: 2px solid var(--ts-fg);
+        background: var(--ts-purple); cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+      }
       #ts-model-overlay .ts-badge {
         font-size: 9.5px;
         font-weight: 700;
@@ -2198,11 +2215,12 @@
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
           <button id="ts-drag-handle" title="Click and drag to move panel" class="ts-btn ts-btn-move" style="flex:1;">✋ MOVE</button>
           <button id="ts-refresh-btn" title="Clear Cache & Reset Race" class="ts-btn ts-btn-reset" style="flex:1;">🔄 RESET</button>
-          <div style="flex:1.8;display:flex;align-items:center;gap:6px;background:var(--ts-bg-code);padding:4px 8px;border-radius:6px;border:1px solid var(--ts-border-soft);">
-            <span class="ts-muted" style="font-size:10.5px;font-weight:700;">ZOOM</span>
-            <input type="range" id="ts-zoom-slider" min="50" max="200" value="${Math.round(currentZoom * 100)}" style="width:100%;cursor:pointer;accent-color:var(--ts-purple);">
-            <span id="ts-zoom-label" style="color:var(--ts-cyan);font-size:10.5px;font-weight:700;min-width:36px;text-align:right;">${Math.round(currentZoom * 100)}%</span>
-          </div>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:8px;background:var(--ts-bg-code);padding:6px 10px;border-radius:6px;border:1px solid var(--ts-border-soft);margin-bottom:8px;">
+          <span class="ts-muted" style="font-size:10.5px;font-weight:700;">ZOOM</span>
+          <input type="range" id="ts-zoom-slider" min="50" max="200" value="${Math.round(currentZoom * 100)}" style="flex:1;cursor:pointer;accent-color:var(--ts-purple);">
+          <span id="ts-zoom-label" style="color:var(--ts-cyan);font-size:10.5px;font-weight:700;min-width:36px;text-align:right;">${Math.round(currentZoom * 100)}%</span>
         </div>
 
         <div style="display:flex;align-items:center;gap:8px;">
