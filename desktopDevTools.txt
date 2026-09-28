@@ -4,6 +4,18 @@
   let dragOffsetX = 0;
   let dragOffsetY = 0;
 
+  // Request-ordering protection: a slow-resolving OLDER request can complete after a newer one
+  // to the SAME endpoint already landed, silently reverting fresh data back to stale data (a likely
+  // cause of numbers flip-flopping for minutes with no imputation/averaging explanation). Sequenced
+  // by when each request was SENT (not when it resolves), and scoped per-endpoint (URL path only,
+  // stripped of query string) so it never discards a genuinely different data type's response --
+  // only a stale duplicate of the SAME endpoint.
+  let requestSeqCounter = 0;
+  let lastSeqByUrlPattern = {};
+  function getUrlPattern(url) {
+    return String(url || '').split('?')[0];
+  }
+
   // Loader, Tab & Calculation Tracking State
   const REQUIRED_TABS = ['Summary', 'Advanced', 'Speed', 'Class', 'Pace', 'Comments', 'Pools', 'Probables'];
 
@@ -422,6 +434,37 @@
         }
         resetRaceData();
         updateOverlay();
+      }
+
+      // Copies whatever is CURRENTLY on screen, read live from the DOM at click time — not a
+      // stored snapshot — since the panel can re-render at any moment and a manual text selection
+      // gets wiped out before the user can hit Cmd/Ctrl+C.
+      function copyToClipboard(text, btn) {
+        navigator.clipboard.writeText(text).then(() => {
+          let original = btn.innerText;
+          btn.innerText = '✅ Copied!';
+          setTimeout(() => { btn.innerText = original; }, 1500);
+        }).catch(() => {});
+      }
+
+      if (e.target.id === 'ts-copy-audit-btn') {
+        let horsesCsv = document.getElementById('ts-audit-horses-csv');
+        let statsCsv = document.getElementById('ts-audit-stats-csv');
+        let poolsCsv = document.getElementById('ts-audit-pools-csv');
+        let fullText = [
+          'ALL HORSES CSV:',
+          horsesCsv ? horsesCsv.innerText.trim() : '',
+          '',
+          'RACE STATS ROWS:',
+          statsCsv ? statsCsv.innerText.trim() : '',
+          poolsCsv ? poolsCsv.innerText.trim() : ''
+        ].join('\n');
+        copyToClipboard(fullText, e.target);
+      }
+
+      if (e.target.id === 'ts-copy-export-btn') {
+        let pipeBlock = document.getElementById('ts-export-pipe-string');
+        copyToClipboard(pipeBlock ? pipeBlock.innerText.trim() : '', e.target);
       }
     });
 
@@ -1826,9 +1869,10 @@
       <div class="ts-panel">
         <div class="ts-row-flex" style="margin-bottom:6px;">
           <div class="ts-panel-title" style="color:var(--ts-purple);margin-bottom:0;">🧪 Testing Export Data (Pipe Delimited)</div>
-          <div class="ts-muted" style="font-size:10px;">Excel / Text-to-Columns Ready</div>
+          <button id="ts-copy-export-btn" class="ts-btn" style="padding:3px 8px;font-size:10px;">📋 Copy</button>
         </div>
-        <div class="ts-code-block" style="color:var(--ts-fg);word-break:break-all;user-select:all;border:1px solid var(--ts-purple);">
+        <div class="ts-muted" style="font-size:10px;margin-bottom:4px;">Excel / Text-to-Columns Ready</div>
+        <div id="ts-export-pipe-string" class="ts-code-block" style="color:var(--ts-fg);word-break:break-all;user-select:all;border:1px solid var(--ts-purple);">
           ${pipeString}
         </div>
         <div class="ts-muted ts-italic" style="font-size:10px;margin-top:4px;">
@@ -2148,19 +2192,27 @@
       ${getCommentsSectionHtml(modelRes.leaderboard)}
 
       <div class="ts-panel" style="border-style:dashed;">
-        <div class="ts-muted" style="font-weight:700;margin-bottom:4px;font-size:11px;">AUDIT SECTION (RAW EXTRACTED CSVs)</div>
+        <div class="ts-row-flex" style="margin-bottom:4px;">
+          <div class="ts-muted" style="font-weight:700;font-size:11px;">AUDIT SECTION (RAW EXTRACTED CSVs)</div>
+          <button id="ts-copy-audit-btn" class="ts-btn" style="padding:3px 8px;font-size:10px;">📋 Copy All</button>
+        </div>
         <div class="ts-section-label">All Horses CSV</div>
-        <div class="ts-code-block" style="color:var(--ts-green);word-break:break-all;white-space:pre-wrap;margin-bottom:6px;max-height:140px;font-size:10.5px;">${getFormattedHorsesCsv()}</div>
+        <div id="ts-audit-horses-csv" class="ts-code-block" style="color:var(--ts-green);word-break:break-all;white-space:pre-wrap;margin-bottom:6px;max-height:140px;font-size:10.5px;">${getFormattedHorsesCsv()}</div>
         <div class="ts-section-label">Race Stats Rows</div>
-        <div class="ts-code-block" style="color:var(--ts-cyan);word-break:break-all;white-space:pre-wrap;margin-bottom:6px;font-size:10.5px;">${cachedStatsCsv}</div>
-        <div class="ts-code-block" style="color:var(--ts-orange);word-break:break-all;white-space:pre-wrap;font-size:10.5px;">${getRaceWidePoolsCsv()}</div>
+        <div id="ts-audit-stats-csv" class="ts-code-block" style="color:var(--ts-cyan);word-break:break-all;white-space:pre-wrap;margin-bottom:6px;font-size:10.5px;">${cachedStatsCsv}</div>
+        <div id="ts-audit-pools-csv" class="ts-code-block" style="color:var(--ts-orange);word-break:break-all;white-space:pre-wrap;font-size:10.5px;">${getRaceWidePoolsCsv()}</div>
       </div>
     `;
 
     applyZoom();
   }
 
-  function processResponse(url, text) {
+  function processResponse(url, text, seq) {
+    if (seq !== undefined) {
+      let pattern = getUrlPattern(url);
+      if (lastSeqByUrlPattern[pattern] !== undefined && seq < lastSeqByUrlPattern[pattern]) return; // stale, superseded
+      lastSeqByUrlPattern[pattern] = seq;
+    }
     if (!text || (text.trim().charAt(0) !== '{' && text.trim().charAt(0) !== '[')) return;
     try {
       let data = JSON.parse(text);
@@ -2242,8 +2294,9 @@
 
   const origOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url) {
+    let seq = ++requestSeqCounter;
     this.addEventListener('load', function() {
-      processResponse(url, this.responseText);
+      processResponse(url, this.responseText, seq);
     });
     origOpen.apply(this, arguments);
   };
@@ -2251,11 +2304,12 @@
   const origFetch = window.fetch;
   if (origFetch) {
     window.fetch = async function(...args) {
+      let seq = ++requestSeqCounter;
       let response = await origFetch.apply(this, args);
       try {
         let clone = response.clone();
         let url = typeof args[0] === 'string' ? args[0] : (args[0] ? args[0].url : '');
-        clone.text().then(text => processResponse(url, text));
+        clone.text().then(text => processResponse(url, text, seq));
       } catch(e) {}
       return response;
     };
