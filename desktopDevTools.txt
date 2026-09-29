@@ -1,5 +1,6 @@
 (function launchTwinSpiresVariableInspectorV25() {
   let currentZoom = 1.0;
+  let currentWidth = 860; // desktop panel width in px (before zoom); capped at 94vw when applied
   let isDragging = false;
   let dragOffsetX = 0;
   let dragOffsetY = 0;
@@ -33,6 +34,11 @@
   // default; toggled on/off via the switch in the status row. Delete this block, its toggle UI/
   // event listener, and its one usage below to remove the feature entirely once backtesting is done.
   let dualWeightTestMode = false;
+  let isOverlayVisible = true;
+
+  // Embedded Horse Image URL for the show/hide toggle button (same as mobile)
+  const HORSE_IMAGE_URL = 'https://raw.githubusercontent.com/littlejohn2201/handicapping2.0/main/apple-touch-icon.png';
+  let wagerTableExpanded = false; // user preference: show all bet types beyond Option A/B (persists across races)
   let loadedTabs = {
     'Summary': false,
     'Advanced': false,
@@ -314,6 +320,53 @@
     outline.style.display = 'block';
   }
 
+  // Width-slider preview: same dashed outline as the zoom preview. The panel's right edge stays put
+  // (transform-origin is top right), so the outline grows/shrinks leftward from that edge.
+  function updateWidthPreview(previewWidthPx) {
+    let overlay = document.getElementById('ts-model-overlay');
+    if (!overlay) return;
+
+    let label = document.getElementById('ts-width-label');
+    if (label) label.innerText = `${Math.round(previewWidthPx)}px`;
+
+    let outline = document.getElementById('ts-zoom-outline');
+    if (!outline) {
+      outline = document.createElement('div');
+      outline.id = 'ts-zoom-outline';
+      outline.style.cssText = 'position:fixed;z-index:1000000;border:2px dashed #bd93f9;background:rgba(189,147,249,0.15);pointer-events:none;border-radius:8px;box-shadow:0 0 15px rgba(189,147,249,0.4);transition:none;';
+      document.body.appendChild(outline);
+    }
+
+    let rect = overlay.getBoundingClientRect();
+    let effectiveW = Math.max(300, Math.min(previewWidthPx, window.innerWidth * 0.94));
+    let previewW = effectiveW * currentZoom;
+
+    outline.style.top = `${rect.top}px`;
+    outline.style.left = `${rect.right - previewW}px`;
+    outline.style.width = `${previewW}px`;
+    outline.style.height = `${rect.height}px`;
+    outline.style.display = 'block';
+  }
+
+  function applyWidth(keepRightEdge) {
+    let overlay = document.getElementById('ts-model-overlay');
+    if (overlay) {
+      let oldW = overlay.offsetWidth;
+      overlay.style.width = `min(${currentWidth}px, 94vw)`;
+      // If the panel was moved (positioned by `left`), keep its visual right edge fixed on resize.
+      if (keepRightEdge && overlay.style.right === 'auto') {
+        let newW = overlay.offsetWidth;
+        let curLeft = parseFloat(overlay.style.left) || 0;
+        overlay.style.left = `${curLeft + (oldW - newW)}px`;
+      }
+      let label = document.getElementById('ts-width-label');
+      if (label) label.innerText = `${currentWidth}px`;
+      let slider = document.getElementById('ts-width-slider');
+      if (slider && parseFloat(slider.value) !== currentWidth) slider.value = currentWidth;
+    }
+    removeZoomPreview();
+  }
+
   function removeZoomPreview() {
     let outline = document.getElementById('ts-zoom-outline');
     if (outline) {
@@ -334,6 +387,102 @@
       }
     }
     removeZoomPreview();
+  }
+
+  function injectToggleStyles() {
+    let style = document.getElementById('ts-toggle-btn-styles');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'ts-toggle-btn-styles';
+      document.head.appendChild(style);
+    }
+    style.textContent = `
+      button#ts-toggle-btn.ts-toggle-btn {
+        position: fixed !important;
+        bottom: 85px !important;
+        left: 15px !important;
+        z-index: 1000001 !important;
+        width: 60px !important;
+        height: 60px !important;
+        min-width: 60px !important;
+        max-width: 60px !important;
+        min-height: 60px !important;
+        max-height: 60px !important;
+        border-radius: 50% !important;
+        border: 3px solid #6272a4 !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        overflow: hidden !important;
+        cursor: pointer !important;
+        background-color: #191a21 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        outline: none !important;
+        box-shadow: 0 6px 16px rgba(0,0,0,0.6) !important;
+        transition: transform 0.15s ease, border-color 0.2s ease, opacity 0.2s ease !important;
+        opacity: 0.65 !important;
+        box-sizing: border-box !important;
+        font-size: 0 !important;
+        line-height: 0 !important;
+        text-indent: -9999px !important;
+      }
+
+      button#ts-toggle-btn.ts-toggle-btn:hover {
+        transform: scale(1.05) !important;
+      }
+
+      button#ts-toggle-btn.ts-toggle-btn:active {
+        transform: scale(0.95) !important;
+      }
+
+      button#ts-toggle-btn.ts-toggle-btn img {
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: cover !important;
+        display: block !important;
+        pointer-events: none !important;
+        border-radius: 50% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+
+      button#ts-toggle-btn.ts-toggle-btn.active {
+        border-color: #bd93f9 !important;
+        opacity: 1.0 !important;
+      }
+    `;
+  }
+
+  function renderToggleButton() {
+    injectToggleStyles();
+
+    let btn = document.getElementById('ts-toggle-btn');
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.id = 'ts-toggle-btn';
+      btn.type = 'button';
+      btn.className = `ts-toggle-btn ${isOverlayVisible ? 'active' : ''}`;
+
+      const toggleImg = document.createElement('img');
+      toggleImg.src = HORSE_IMAGE_URL;
+      toggleImg.alt = 'Toggle Model';
+
+      btn.appendChild(toggleImg);
+
+      btn.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        let overlay = document.getElementById('ts-model-overlay');
+        if (overlay) {
+          isOverlayVisible = !isOverlayVisible;
+          overlay.style.display = isOverlayVisible ? 'block' : 'none';
+          btn.classList.toggle('active', isOverlayVisible);
+        }
+      });
+
+      document.body.appendChild(btn);
+    }
   }
 
   function resetRaceData() {
@@ -376,88 +525,39 @@
     startCollectionTicker();
   }
 
-  // Proactive race-change detection. The existing reset logic only fires reactively, inside
-  // processResponse() — it waits for a network response to arrive before checking the URL. If
-  // TwinSpires doesn't fire a new request right away after navigating, stale data (comments
-  // included) can sit there until one eventually does. Polling the URL directly closes that gap —
-  // reset fires the instant navigation happens, regardless of network timing.
-  let lastWatchedUrl = window.location.href;
-  function watchForRaceChange() {
-    if (window.location.href === lastWatchedUrl) return;
-    lastWatchedUrl = window.location.href;
-    let urlData = parseTwinSpiresUrl();
-    if (!urlData) return;
-    let changed = (urlData.raceNum && cachedRaceNum && urlData.raceNum !== cachedRaceNum) ||
-                  (urlData.trackName && cachedTrackName && urlData.trackName !== cachedTrackName && urlData.trackName !== "Unknown Track");
-    if (changed) {
-      resetRaceData();
-      cachedRaceNum = urlData.raceNum || cachedRaceNum;
-      cachedTrackName = urlData.trackName || cachedTrackName;
-      updateOverlay();
-      setTimeout(autoClickTabs, 400); // brief delay for the new race's page content to render
-    }
+  // Race/track change detection. Compares a normalized key (track|raceNum) that ONLY this function
+  // and the Reset button write — payload parsing never touches it. (The old check compared the URL
+  // against cachedRaceNum/cachedTrackName, but every incoming payload overwrites those, so by the
+  // time a check ran the "previous" value could already equal the new one and the reset was
+  // silently skipped, leaving stale Comments/Pools behind.) Comparison is normalized so 5 vs "5"
+  // or differing capitalization/punctuation in the track name don't count as a change.
+  let activeRaceKey = null;
+  function makeRaceKey(track, race, prevKey) {
+    let prev = prevKey ? prevKey.split('|') : ['', ''];
+    let t = (track && track !== 'Unknown Track') ? String(track).toLowerCase().replace(/[^a-z0-9]/g, '') : '';
+    let r = race ? String(race).replace(/[^0-9]/g, '') : '';
+    return (t || prev[0]) + '|' + (r || prev[1]);
   }
-  setInterval(watchForRaceChange, 1000);
-
-  // Best-effort auto-click through the data tabs after a race change, so they don't have to be
-  // clicked by hand every time. Matches on visible text the same way the manual-click listener
-  // already does — since the exact tab markup isn't something we can verify without seeing the
-  // live page, this may need adjusting if a given tab doesn't reliably get found/clicked.
-  //
-  // Visibility check uses bounding-rect + computed style rather than offsetParent — offsetParent
-  // is null for position:fixed/sticky elements even when fully visible in most browsers, a common
-  // gotcha for exactly the kind of sticky tab nav bar this is likely clicking on.
-  function isVisibleForClick(el) {
-    let rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return false;
-    let style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) return false;
+  function checkRaceChange(track, race) {
+    let newKey = makeRaceKey(track, race, activeRaceKey);
+    if (newKey === '|') return false;
+    if (activeRaceKey === null) { // first sighting this session — record it, nothing to reset yet
+      activeRaceKey = newKey;
+      return false;
+    }
+    if (newKey === activeRaceKey) return false;
+    resetRaceData();
+    activeRaceKey = newKey;
+    if (track && track !== 'Unknown Track') cachedTrackName = track;
+    if (race) cachedRaceNum = race;
+    updateOverlay();
     return true;
   }
-
-  // Dispatches a full mouse event sequence rather than just calling .click() — some frameworks'
-  // handlers listen for mousedown/mouseup specifically and don't reliably fire on a synthetic
-  // .click() alone.
-  function simulateRealClick(el) {
-    ['mousedown', 'mouseup', 'click'].forEach(type => {
-      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-    });
+  function watchForRaceChange() {
+    let urlData = parseTwinSpiresUrl();
+    if (urlData) checkRaceChange(urlData.trackName, urlData.raceNum);
   }
-
-  function autoClickTabs() {
-    // Genuinely interactive elements first (button/a/[role=tab]) — reduces the chance of matching
-    // a decoy text node (e.g. a heading) before the real clickable tab; broader tags as a fallback.
-    let priorityCandidates = document.querySelectorAll('button, a, [role="tab"]');
-    let fallbackCandidates = document.querySelectorAll('li, span, div');
-    REQUIRED_TABS.forEach(tab => {
-      if (tab === 'Comments') return; // no page tab for this one — handled by its own timeout logic
-      let found = false;
-      let candidatesSeenForThisTab = []; // diagnostic only
-      for (let group of [priorityCandidates, fallbackCandidates]) {
-        for (let el of group) {
-          let text = (el.innerText || el.textContent || '').trim();
-          let textLower = text.toLowerCase();
-          let tabLower = tab.toLowerCase();
-          // Exact match OR "contains" fallback — matches the same pattern the manual-click
-          // detection elsewhere in this file already uses, since real tab elements often carry
-          // extra whitespace, icons, or badge text alongside the label, which a strict equality
-          // check would silently fail to match.
-          if (textLower === tabLower || textLower.includes(tabLower)) {
-            let vis = isVisibleForClick(el);
-            candidatesSeenForThisTab.push({ tag: el.tagName, text, visible: vis, outerHTML: el.outerHTML.slice(0, 150) });
-            if (vis) {
-              simulateRealClick(el);
-              found = true;
-              break;
-            }
-          }
-        }
-        if (found) break;
-      }
-      // TEMPORARY DIAGNOSTIC — remove once tab auto-clicking is confirmed working reliably.
-      console.log(`[autoClickTabs] "${tab}": clicked=${found}`, candidatesSeenForThisTab);
-    });
-  }
+  setInterval(watchForRaceChange, 1000);
 
   function startCollectionTicker() {
     if (collectionTicker) clearInterval(collectionTicker);
@@ -477,7 +577,24 @@
         let previewVal = parseFloat(e.target.value) / 100.0;
         updateZoomPreview(previewVal);
       }
+      if (e.target && e.target.id === 'ts-width-slider') {
+        updateWidthPreview(parseFloat(e.target.value));
+      }
     });
+
+    function commitWidth(e) {
+      if (e.target && e.target.id === 'ts-width-slider') {
+        let slider = document.getElementById('ts-width-slider');
+        if (slider) {
+          currentWidth = Math.round(parseFloat(slider.value));
+          applyWidth(true);
+        }
+      }
+    }
+
+    document.addEventListener('change', commitWidth);
+    document.addEventListener('mouseup', commitWidth);
+    document.addEventListener('touchend', commitWidth);
 
     function commitZoom(e) {
       if (e.target && e.target.id === 'ts-zoom-slider') {
@@ -503,9 +620,19 @@
     document.addEventListener('click', function(e) {
       if (!e.target) return;
 
+      if (e.target.id === 'ts-wager-expand-btn') {
+        wagerTableExpanded = !wagerTableExpanded;
+        updateOverlay();
+        return;
+      }
+
       let clickedText = (e.target.innerText || e.target.textContent || '').trim();
+      // Clicks inside our own panel never count (its loader lists every tab name), and a click on a
+      // big container whose text merely CONTAINS tab names shouldn't mark several tabs loaded at
+      // once — a real tab label is short.
+      let clickIsTabCandidate = !(e.target.closest && e.target.closest('#ts-model-overlay')) && clickedText.length <= 40;
       REQUIRED_TABS.forEach(tab => {
-        if (tab !== 'Comments' && (clickedText.toLowerCase() === tab.toLowerCase() || clickedText.toLowerCase().includes(tab.toLowerCase()))) {
+        if (clickIsTabCandidate && tab !== 'Comments' && (clickedText.toLowerCase() === tab.toLowerCase() || clickedText.toLowerCase().includes(tab.toLowerCase()))) {
           loadedTabs[tab] = true;
           setTimeout(updateOverlay, 100);
         }
@@ -518,6 +645,7 @@
           cachedRaceNum = urlData.raceNum;
         }
         resetRaceData();
+        activeRaceKey = urlData ? makeRaceKey(urlData.trackName, urlData.raceNum, null) : null; // keep key in sync with Reset
         updateOverlay();
       }
 
@@ -549,7 +677,11 @@
 
       if (e.target.id === 'ts-copy-export-btn') {
         let pipeBlock = document.getElementById('ts-export-pipe-string');
-        copyToClipboard(pipeBlock ? pipeBlock.innerText.trim() : '', e.target);
+        // Copy as TAB-delimited (pipes -> tabs). Excel always splits tabs into columns on paste,
+        // whereas splitting on pipes only works when Excel still remembers a pipe delimiter from a
+        // previous Text-to-Columns run (that memory resets on restart / other Text-to-Columns use).
+        let exportText = pipeBlock ? pipeBlock.innerText.trim().replace(/\s*\|\s*/g, '\t') : '';
+        copyToClipboard(exportText, e.target);
       }
     });
 
@@ -637,11 +769,44 @@
   // WIN pool (~18% reproduced the track's displayed odds almost exactly).
   const TAKEOUT_RATE = 0.18;
 
+  // Race-specific takeout backed out of the WIN pool. Displayed odds = pool x (1 - takeout) / horse$ - 1,
+  // so takeout = 1 - (odds + 1) x horse$ / pool, computed per active horse (live odds only — morning
+  // line isn't pool-based) and the MEDIAN taken (smooths breakage rounding and max-odds-capped
+  // horses). Needs >= 3 usable horses and a result within 10-30%, otherwise falls back to the
+  // TAKEOUT_RATE constant. Place/Show have no displayed odds to solve from, so they borrow this
+  // figure (assumes straight pools share a rate — not verified). Trifecta cap stays on the constant.
+  function getDerivedTakeout() {
+    if (!cachedWinPoolTotal || cachedWinPoolTotal <= 0) return { rate: null, n: 0 };
+    let vals = [];
+    Object.values(cachedHorsesMap).forEach(h => {
+      if (h.IS_SCRATCHED || cachedScratchedMap[h.PROGRAM]) return;
+      let entry = cachedPoolsMap[String(h.PROGRAM)];
+      if (!entry || !(entry.win > 0)) return;
+      let liveDec = parseOddsToDecimal(h.LIVE_ODDS);
+      if (isNaN(liveDec) || liveDec <= 0) return;
+      vals.push(1 - (liveDec + 1) * entry.win / cachedWinPoolTotal);
+    });
+    if (vals.length < 3) return { rate: null, n: 0 };
+    vals.sort((a, b) => a - b);
+    let mid = Math.floor(vals.length / 2);
+    let median = vals.length % 2 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2;
+    if (!(median >= 0.10 && median <= 0.30)) return { rate: null, n: 0 };
+    return { rate: median, n: vals.length };
+  }
+  function getEffectiveTakeout() {
+    let d = getDerivedTakeout();
+    return d.rate !== null ? d.rate : TAKEOUT_RATE;
+  }
+
   // A bet must promise at least this much back per dollar risked (net of the stake itself) to be
   // worth recommending at all — regardless of EV. A heavy favorite to place/show can be technically
   // EV-positive while still only returning a few cents of profit per dollar, which isn't worth a
   // wager slot even at low risk. 1.4 = payout must be >= 1.4x the stake, i.e. at least 40% profit.
   const MIN_PAYOUT_RATIO = 1.4;
+  // Minimum acceptable EV per $1 staked for Option A/B. Slightly negative on purpose: racing outcomes
+  // are high-variance and ~50%-hit-rate bets with a small modeled edge deficit are still acceptable.
+  // (Set to 0 to require strictly positive EV again.)
+  const MIN_EV_PER_DOLLAR = -0.15;
 
   // Trifecta is by far the hardest bet type here to hit, and its payout estimate is the least
   // grounded in real data (see trifectaPayoutEstimate) — so it gets its own, stricter minimum hit
@@ -997,7 +1162,7 @@
   function getWinPoolPayout(program) {
     let entry = cachedPoolsMap[String(program)];
     if (!entry || entry.win === null || entry.win <= 0 || !cachedWinPoolTotal) return null;
-    let netPool = cachedWinPoolTotal * (1 - TAKEOUT_RATE);
+    let netPool = cachedWinPoolTotal * (1 - getEffectiveTakeout());
     return netPool / entry.win;
   }
 
@@ -1023,7 +1188,7 @@
     if (stakes.some(s => s === null)) return null;
     let targetStake = stakes[0];
     let combinedStakes = stakes.reduce((a, b) => a + b, 0);
-    let netPool = cachedPlacePoolTotal * (1 - TAKEOUT_RATE);
+    let netPool = cachedPlacePoolTotal * (1 - getEffectiveTakeout());
     let profitPool = netPool - combinedStakes;
     if (profitPool <= 0) return null;
     let profitPerPlacer = profitPool / allPlacers.length;
@@ -1042,7 +1207,7 @@
     if (stakes.some(s => s === null)) return null;
     let targetStake = stakes[0];
     let combinedStakes = stakes.reduce((a, b) => a + b, 0);
-    let netPool = cachedShowPoolTotal * (1 - TAKEOUT_RATE);
+    let netPool = cachedShowPoolTotal * (1 - getEffectiveTakeout());
     let profitPool = netPool - combinedStakes;
     if (profitPool <= 0) return null;
     let profitPerPlacer = profitPool / allPlacers.length;
@@ -1182,8 +1347,9 @@
   // exacta base unit, and the takeout constant used across the payout formulas. Kept as a separate
   // small CSV block since it's a different schema than the per-horse rows or the meet/week IV stats.
   function getRaceWidePoolsCsv() {
-    let header = 'WIN_POOL_TOTAL,PLACE_POOL_TOTAL,SHOW_POOL_TOTAL,SHOW_POOL_AVAILABLE,POOLS_PERCENT_MODE_DETECTED,EXACTA_POOL_TOTAL,EXACTA_BASE_UNIT,TRACK_CONDITION,WETNESS_TIER,POST_TIME,TAKEOUT_RATE';
+    let header = 'WIN_POOL_TOTAL,PLACE_POOL_TOTAL,SHOW_POOL_TOTAL,SHOW_POOL_AVAILABLE,POOLS_PERCENT_MODE_DETECTED,EXACTA_POOL_TOTAL,EXACTA_BASE_UNIT,TRACK_CONDITION,WETNESS_TIER,POST_TIME,TAKEOUT_RATE,DERIVED_TAKEOUT_RATE,DERIVED_TAKEOUT_N';
     let wetnessTier = getWetnessTier(cachedTrackCondition);
+    let derivedTakeout = getDerivedTakeout();
     let row = [
       cachedWinPoolTotal || 0,
       cachedPlacePoolTotal || 0,
@@ -1195,7 +1361,9 @@
       cachedTrackCondition ? `"${cachedTrackCondition}"` : '""',
       wetnessTier,
       cachedPostTime ? `"${cachedPostTime}"` : '""',
-      TAKEOUT_RATE
+      TAKEOUT_RATE,
+      derivedTakeout.rate !== null ? derivedTakeout.rate.toFixed(4) : '',
+      derivedTakeout.n
     ].join(',');
     return `${header}\n${row}`;
   }
@@ -1740,7 +1908,7 @@
       // just "above the field average." ---
       // Conviction (and therefore stake size) comes ONLY from how much of a score outlier the top
       // pick is (its z-score) — never from odds or pool data.
-      if (c1 && !c1c2Tie) {
+      if (c1) {
         let realWinPayoutRate = getWinPoolPayout(c1.PROGRAM);
         if (realWinPayoutRate !== null) {
           let pWin = winProbs[c1.PROGRAM].modelProb;
@@ -1751,7 +1919,7 @@
           candidates.push({
             type: 'WIN', typeLabel: 'Win', horses: `#${c1.PROGRAM}`,
             label: `$${stake} WIN on #${c1.PROGRAM}`,
-            cost: stake, hitProb: pWin, ev, evPerDollar: ev / stake,
+            cost: stake, hitProb: pWin, ev, evPerDollar: ev / stake, eligible: !c1c2Tie,
             payoutLow: payoutIfWin, payoutHigh: payoutIfWin,
             isRealData: true,
             detail: `Model Win Prob ${(pWin * 100).toFixed(0)}% (Live Pool Payout)`
@@ -1764,59 +1932,86 @@
       // two), so each needs its own separation-from-c3 check to be trustworthy. Both can be
       // generated at once; the EV/hit-rate selection naturally picks whichever is actually better,
       // rather than the engine hard-coding which horse "deserves" the bet.
-      function buildPlaceCandidate(horse, otherPlacer) {
-        if (!horse || !otherPlacer || !c3) return;
-        if (isNearTie(horse.PROGRAM, c3.PROGRAM)) return; // boundary threat from c3
-        let realPlacePayoutRate = getPlacePoolPayout(horse.PROGRAM, [otherPlacer.PROGRAM]);
-        if (realPlacePayoutRate === null) return;
+      // Place/Show payouts depend on WHO ELSE places (each placer's stake comes out of the shared
+      // pool, so a heavily-bet co-placer drags everyone's payout down). We can't know that in
+      // advance, so instead of trusting one guessed co-placer set we price EVERY plausible set drawn
+      // from the model's top-5 contenders: payoutLow = worst case (what the 1.4x payout gate tests),
+      // payoutHigh = best case, and EV uses the average across sets.
+      let contenders = ranked.slice(0, 5);
+      function summarizeRates(rates) {
+        rates = rates.filter(r => r !== null);
+        if (rates.length === 0) return null;
+        return {
+          min: Math.min(...rates), max: Math.max(...rates),
+          avg: rates.reduce((x, y) => x + y, 0) / rates.length, n: rates.length
+        };
+      }
+      function placeRateRange(horse) {
+        let others = contenders.filter(h => h.PROGRAM !== horse.PROGRAM);
+        return summarizeRates(others.map(o => getPlacePoolPayout(horse.PROGRAM, [o.PROGRAM])));
+      }
+      function showRateRange(horse) {
+        let others = contenders.filter(h => h.PROGRAM !== horse.PROGRAM);
+        let rates = [];
+        for (let i = 0; i < others.length; i++) {
+          for (let j = i + 1; j < others.length; j++) {
+            rates.push(getShowPoolPayout(horse.PROGRAM, [others[i].PROGRAM, others[j].PROGRAM]));
+          }
+        }
+        return summarizeRates(rates);
+      }
+
+      function buildPlaceCandidate(horse) {
+        if (!horse || !c3) return;
+        let placeEligible = !isNearTie(horse.PROGRAM, c3.PROGRAM); // boundary threat from c3 (gates Option A/B eligibility only)
+        let range = placeRateRange(horse);
+        if (range === null) return;
         let pPlace = placeProbabilityOf(horse.PROGRAM);
         if (pPlace <= 0) return;
         let conviction = computeConviction(winProbs[horse.PROGRAM].zScore);
         let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
-        let payoutIfPlace = stake * realPlacePayoutRate;
-        let ev = pPlace * payoutIfPlace - stake;
+        let ev = pPlace * (stake * range.avg) - stake;
         candidates.push({
           type: 'PLACE', typeLabel: 'Place', horses: `#${horse.PROGRAM}`,
           label: `$${stake} PLACE on #${horse.PROGRAM}`,
-          cost: stake, hitProb: pPlace, ev, evPerDollar: ev / stake,
-          payoutLow: payoutIfPlace, payoutHigh: payoutIfPlace,
+          cost: stake, hitProb: pPlace, ev, evPerDollar: ev / stake, eligible: placeEligible,
+          payoutLow: stake * range.min, payoutHigh: stake * range.max,
           isRealData: true,
-          detail: `Model Place Prob ${(pPlace * 100).toFixed(0)}% (Live Pool Payout, assumes #${otherPlacer.PROGRAM} is the other placer)`
+          detail: `Model Place Prob ${(pPlace * 100).toFixed(0)}% (Live Pool Payout, range across ${range.n} possible co-placers; EV uses the average)`
         });
       }
-      buildPlaceCandidate(c1, c2);
-      buildPlaceCandidate(c2, c1);
+      buildPlaceCandidate(c1);
+      buildPlaceCandidate(c2);
 
       // --- SHOW: evaluates c1, c2, AND c3 independently — boundary threat for each is c4. ---
-      function buildShowCandidate(horse, otherTwo) {
-        if (!horse || otherTwo.length < 2 || !c4) return;
-        if (isNearTie(horse.PROGRAM, c4.PROGRAM)) return;
-        let realShowPayoutRate = getShowPoolPayout(horse.PROGRAM, otherTwo.map(h => h.PROGRAM));
-        if (realShowPayoutRate === null) return;
+      function buildShowCandidate(horse) {
+        if (!horse || !c4) return;
+        let showEligible = !isNearTie(horse.PROGRAM, c4.PROGRAM);
+        let range = showRateRange(horse);
+        if (range === null) return;
         let pShow = showProbabilityOf(horse.PROGRAM);
         if (pShow <= 0) return;
         let conviction = computeConviction(winProbs[horse.PROGRAM].zScore);
         let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
-        let payoutIfShow = stake * realShowPayoutRate;
-        let ev = pShow * payoutIfShow - stake;
+        let ev = pShow * (stake * range.avg) - stake;
         candidates.push({
           type: 'SHOW', typeLabel: 'Show', horses: `#${horse.PROGRAM}`,
           label: `$${stake} SHOW on #${horse.PROGRAM}`,
-          cost: stake, hitProb: pShow, ev, evPerDollar: ev / stake,
-          payoutLow: payoutIfShow, payoutHigh: payoutIfShow,
+          cost: stake, hitProb: pShow, ev, evPerDollar: ev / stake, eligible: showEligible,
+          payoutLow: stake * range.min, payoutHigh: stake * range.max,
           isRealData: true,
-          detail: `Model Show Prob ${(pShow * 100).toFixed(0)}% (Live Pool Payout, assumes #${otherTwo.map(h => h.PROGRAM).join('/#')} are the other placers)`
+          detail: `Model Show Prob ${(pShow * 100).toFixed(0)}% (Live Pool Payout, range across ${range.n} possible co-placer pairs; EV uses the average)`
         });
       }
       if (c1 && c2 && c3) {
-        buildShowCandidate(c1, [c2, c3]);
-        buildShowCandidate(c2, [c1, c3]);
-        buildShowCandidate(c3, [c1, c2]);
+        buildShowCandidate(c1);
+        buildShowCandidate(c2);
+        buildShowCandidate(c3);
       }
 
       // --- Exacta Straight: c1 over c2 — only when c1 is CLEARLY ahead of c2 (confident who wins)
       // AND c2 is CLEARLY ahead of c3 (confident who's second, not threatened by c3). ---
-      if (c1 && c2 && !c1c2Tie && !c2c3Tie) {
+      if (c1 && c2) {
         let pOrder = exactaOrderProb(c1.PROGRAM, c2.PROGRAM);
         let payout = exactaPayoutEstimate(c1.PROGRAM, c2.PROGRAM);
         if (payout && payout.value > 0 && pOrder > 0) {
@@ -1829,7 +2024,7 @@
           candidates.push({
             type: 'EXACTA_STRAIGHT', typeLabel: 'Exacta (Straight)', horses: `#${c1.PROGRAM}/#${c2.PROGRAM}`,
             label: `$${cost.toFixed(0)} Straight Exacta: #${c1.PROGRAM} / #${c2.PROGRAM}`,
-            cost, hitProb: pOrder, ev, evPerDollar: ev / cost,
+            cost, hitProb: pOrder, ev, evPerDollar: ev / cost, eligible: !c1c2Tie && !c2c3Tie,
             payoutLow: payoutIfHit * 0.85, payoutHigh: payoutIfHit * 1.15,
             isRealData: true,
             detail: `Live Probable $${payout.value.toFixed(2)}/$1 base`
@@ -1837,91 +2032,95 @@
         }
       }
 
-      // --- Exacta Wheel: c1 is CLEARLY winning, but 2nd place is genuinely uncertain among a
-      // tied cluster of chasers. Wheels c1 over each horse in that cluster (2-3 horses) — only ONE
-      // direction per pair, unlike a box, since who wins is not in question here. ---
-      if (c1 && c2 && c3 && !c1c2Tie && c2c3Tie) {
-        let wheelHorses = [c2, c3];
-        if (c4 && c3c4Tie) wheelHorses.push(c4); // extend to a 3rd wheeled horse if also tied to c3
+      // --- Exacta Wheel (3 and 4 horse): c1 over the next 2 (or 3) horses, ONE direction only.
+      // Both sizes are always generated so the expanded table can show them; `eligible` marks
+      // whether the original clustering rule would have picked it for Option A/B: c1 CLEARLY
+      // ahead (!c1c2Tie) with tied chasers (c2c3Tie), sized to 3 wheeled horses only if c4 is also
+      // tied to c3. ---
+      if (c1 && c2 && c3) {
+        [2, 3].forEach(nLegs => {
+          let wheelHorses = [c2, c3];
+          if (nLegs === 3) { if (!c4) return; wheelHorses.push(c4); }
+          let wants4 = !!(c4 && c3c4Tie);
+          let wheelEligible = !c1c2Tie && c2c3Tie && (nLegs === 3 ? wants4 : !wants4);
 
-        let legs = wheelHorses.map(h => ({
-          horse: h, p: exactaOrderProb(c1.PROGRAM, h.PROGRAM), pay: exactaPayoutEstimate(c1.PROGRAM, h.PROGRAM)
-        }));
-        let allReal = legs.every(l => l.pay && l.pay.value > 0);
-        if (allReal) {
-          let cost = baseU * legs.length;
-          let pWheel = legs.reduce((sum, l) => sum + l.p, 0);
-          let expectedPayout = legs.reduce((sum, l) => sum + l.p * l.pay.value, 0) * baseU;
-          let ev = expectedPayout - cost;
-          let payValues = legs.map(l => l.pay.value);
-          candidates.push({
-            type: 'EXACTA_WHEEL', typeLabel: `Exacta Wheel (${legs.length + 1})`,
-            horses: `#${c1.PROGRAM} / ${wheelHorses.map(h => '#' + h.PROGRAM).join(', ')}`,
-            label: `$${cost.toFixed(0)} Exacta Wheel: #${c1.PROGRAM} over ${wheelHorses.map(h => '#' + h.PROGRAM).join(', ')}`,
-            cost, hitProb: pWheel, ev, evPerDollar: ev / cost,
-            payoutLow: Math.min(...payValues) * baseU * 0.85, payoutHigh: Math.max(...payValues) * baseU * 1.15,
-            isRealData: true,
-            detail: `Live Probables, ${(pWheel * 100).toFixed(0)}% modeled hit rate (${legs.length} combos)`
-          });
-        }
-      }
-
-      // --- Exacta Box: only when c1/c2 ARE near-tied — that's the whole premise of a box, genuine
-      // uncertainty about the order between them. Extends to c3 only if it's ALSO tied to c2; by
-      // construction this naturally stops exactly where the next horse down is clearly separated,
-      // without needing a separate explicit check for that. ---
-      if (c1 && c2 && c1c2Tie) {
-        let boxHorses = [c1, c2];
-        if (c3 && c2c3Tie) boxHorses.push(c3);
-
-        let n = boxHorses.length;
-        let progs = boxHorses.map(h => h.PROGRAM);
-        let combos = [];
-        for (let i = 0; i < n; i++) {
-          for (let j = 0; j < n; j++) {
-            if (i !== j) combos.push([progs[i], progs[j]]);
+          let legs = wheelHorses.map(h => ({
+            horse: h, p: exactaOrderProb(c1.PROGRAM, h.PROGRAM), pay: exactaPayoutEstimate(c1.PROGRAM, h.PROGRAM)
+          }));
+          let allReal = legs.every(l => l.pay && l.pay.value > 0);
+          if (allReal) {
+            let cost = baseU * legs.length;
+            let pWheel = legs.reduce((sum, l) => sum + l.p, 0);
+            let expectedPayout = legs.reduce((sum, l) => sum + l.p * l.pay.value, 0) * baseU;
+            let ev = expectedPayout - cost;
+            let payValues = legs.map(l => l.pay.value);
+            candidates.push({
+              type: 'EXACTA_WHEEL', typeLabel: `Exacta Wheel (${legs.length + 1})`,
+              horses: `#${c1.PROGRAM} / ${wheelHorses.map(h => '#' + h.PROGRAM).join(', ')}`,
+              label: `$${cost.toFixed(0)} Exacta Wheel: #${c1.PROGRAM} over ${wheelHorses.map(h => '#' + h.PROGRAM).join(', ')}`,
+              cost, hitProb: pWheel, ev, evPerDollar: ev / cost, eligible: wheelEligible,
+              payoutLow: Math.min(...payValues) * baseU * 0.85, payoutHigh: Math.max(...payValues) * baseU * 1.15,
+              isRealData: true,
+              detail: `Live Probables, ${(pWheel * 100).toFixed(0)}% modeled hit rate (${legs.length} combos)`
+            });
           }
-        }
-
-        let cost = baseU * combos.length;
-        let pBox = 0, expectedPayout = 0, allReal = true, payValues = [];
-        combos.forEach(([a, b]) => {
-          let p = exactaOrderProb(a, b);
-          let pay = exactaPayoutEstimate(a, b);
-          if (!pay || !pay.isReal) allReal = false;
-          pBox += p;
-          expectedPayout += p * (pay ? pay.value : 0) * baseU;
-          if (pay) payValues.push(pay.value);
         });
-
-        if (allReal) {
-          let ev = expectedPayout - cost;
-          candidates.push({
-            type: n === 2 ? 'EXACTA_BOX2' : 'EXACTA_BOX3', typeLabel: `Exacta Box (${n})`,
-            horses: progs.map(p => `#${p}`).join(', '),
-            label: `$${cost.toFixed(0)} Exacta Box (${n}): ${progs.map(p => '#' + p).join(', ')}`,
-            cost, hitProb: pBox, ev, evPerDollar: ev / cost,
-            payoutLow: (payValues.length ? Math.min(...payValues) : 0) * baseU * 0.85,
-            payoutHigh: (payValues.length ? Math.max(...payValues) : 0) * baseU * 1.15,
-            isRealData: true,
-            detail: `Live Probables, ${(pBox * 100).toFixed(0)}% modeled hit rate (${combos.length} combos)`
-          });
-        }
       }
 
-      // --- Trifecta box: same clustering principle as the exacta box — c1/c2/c3 must actually be
-      // mutually near-tied to justify boxing them together at all, not assumed unconditionally. ---
-      if (c1 && c2 && c3 && c1c2Tie && c2c3Tie && cachedTrifectaPoolTotal > 0) {
-        let baseCost3 = 6 * TRIFECTA_MIN_BASE_UNIT; // 3-horse box = 6 permutations, the floor
-        if (baseCost3 <= MAX_TRIFECTA_STAKE) {
-          let trifectaBox = [c1, c2, c3];
-          if (c4 && c3c4Tie) {
-            let cost4 = 24 * TRIFECTA_MIN_BASE_UNIT; // 4-horse box = 24 permutations
-            if (cost4 <= MAX_TRIFECTA_STAKE) trifectaBox.push(c4);
+      // --- Exacta Box (2 and 3 horse). Both sizes always generated; `eligible` = the original rule:
+      // a box only makes sense when c1/c2 are near-tied, and extends to c3 only if c2/c3 are also tied. ---
+      if (c1 && c2) {
+        [2, 3].forEach(n => {
+          if (n === 3 && !c3) return;
+          let boxHorses = n === 3 ? [c1, c2, c3] : [c1, c2];
+          let boxEligible = c1c2Tie && (n === 3 ? c2c3Tie : !(c3 && c2c3Tie));
+
+          let progs = boxHorses.map(h => h.PROGRAM);
+          let combos = [];
+          for (let i = 0; i < n; i++) {
+            for (let j = 0; j < n; j++) {
+              if (i !== j) combos.push([progs[i], progs[j]]);
+            }
           }
 
-          let boxProgs = trifectaBox.map(h => h.PROGRAM);
-          let n = boxProgs.length;
+          let cost = baseU * combos.length;
+          let pBox = 0, expectedPayout = 0, allReal = true, payValues = [];
+          combos.forEach(([a, b]) => {
+            let p = exactaOrderProb(a, b);
+            let pay = exactaPayoutEstimate(a, b);
+            if (!pay || !pay.isReal) allReal = false;
+            pBox += p;
+            expectedPayout += p * (pay ? pay.value : 0) * baseU;
+            if (pay) payValues.push(pay.value);
+          });
+
+          if (allReal) {
+            let ev = expectedPayout - cost;
+            candidates.push({
+              type: n === 2 ? 'EXACTA_BOX2' : 'EXACTA_BOX3', typeLabel: `Exacta Box (${n})`,
+              horses: progs.map(p => `#${p}`).join(', '),
+              label: `$${cost.toFixed(0)} Exacta Box (${n}): ${progs.map(p => '#' + p).join(', ')}`,
+              cost, hitProb: pBox, ev, evPerDollar: ev / cost, eligible: boxEligible,
+              payoutLow: (payValues.length ? Math.min(...payValues) : 0) * baseU * 0.85,
+              payoutHigh: (payValues.length ? Math.max(...payValues) : 0) * baseU * 1.15,
+              isRealData: true,
+              detail: `Live Probables, ${(pBox * 100).toFixed(0)}% modeled hit rate (${combos.length} combos)`
+            });
+          }
+        });
+      }
+
+      // --- Trifecta Box (3 and 4 horse). Both sizes always generated (when affordable under
+      // MAX_TRIFECTA_STAKE and real data exists for every combo — a live trifecta pool total is NOT
+      // required to display them); `eligible` = the original strict rule (which does require it): c1/c2/c3 mutually near-tied, 4th horse only if tied to c3, plus the hit-prob floor. ---
+      if (c1 && c2 && c3) {
+        let cost4Ok = (24 * TRIFECTA_MIN_BASE_UNIT) <= MAX_TRIFECTA_STAKE;
+        let wants4 = !!(c4 && c3c4Tie && cost4Ok);
+        [3, 4].forEach(n => {
+          if (n === 3 && (6 * TRIFECTA_MIN_BASE_UNIT) > MAX_TRIFECTA_STAKE) return;
+          if (n === 4 && (!c4 || !cost4Ok)) return;
+
+          let boxProgs = (n === 4 ? [c1, c2, c3, c4] : [c1, c2, c3]).map(h => h.PROGRAM);
           let triCombos = [];
           for (let i = 0; i < n; i++) {
             for (let j = 0; j < n; j++) {
@@ -1940,25 +2139,25 @@
             triExpectedPayout += p * (pay || 0) * TRIFECTA_MIN_BASE_UNIT;
           });
 
-          // Strict gate per explicit instruction: real data for every combo AND a decent modeled
-          // chance of actually hitting — on top of the normal EV/payout-ratio filters every other
-          // candidate already has to clear.
-          if (triAllReal && triPBox >= MIN_TRIFECTA_HIT_PROB) {
+          if (triAllReal) {
+            let triEligible = cachedTrifectaPoolTotal > 0 && c1c2Tie && c2c3Tie && (n === 4 ? wants4 : !wants4) && triPBox >= MIN_TRIFECTA_HIT_PROB;
             let triEv = triExpectedPayout - triCost;
             candidates.push({
               type: 'TRIFECTA_BOX', typeLabel: `Trifecta Box (${n})`, horses: boxProgs.map(p => `#${p}`).join(', '),
               label: `$${triCost.toFixed(2)} Trifecta Box (${n}): ${boxProgs.map(p => '#' + p).join(', ')}`,
-              cost: triCost, hitProb: triPBox, ev: triEv, evPerDollar: triEv / triCost,
+              cost: triCost, hitProb: triPBox, ev: triEv, evPerDollar: triEv / triCost, eligible: triEligible,
               payoutLow: triExpectedPayout * 0.6, payoutHigh: triExpectedPayout * 1.4,
               isRealData: true,
               detail: `Est. via real exacta anchor + modeled 3rd leg, ${(triPBox * 100).toFixed(0)}% modeled hit rate (${triCombos.length} combos)`
             });
           }
-        }
+        });
       }
     }
 
-    let positiveEv = candidates.filter(c => c.ev > 0 && c.cost > 0);
+    // Only candidates that pass the clustering rules compete for Option A/B; the rest feed the expanded table.
+    let eligibleCands = candidates.filter(c => c.eligible);
+    let positiveEv = eligibleCands.filter(c => c.evPerDollar >= MIN_EV_PER_DOLLAR && c.cost > 0); // (name kept; = "acceptable EV")
     // Payout ratio uses the conservative (low) end of the estimated range, so a candidate only
     // clears the bar if it's still worth it even under the more pessimistic payout estimate.
     let worthwhile = positiveEv.filter(c => (c.payoutLow / c.cost) >= MIN_PAYOUT_RATIO);
@@ -1966,13 +2165,18 @@
     let optionRows = [];
 
     if (positiveEv.length === 0) {
-      scenario = liveRunners.length < 2 ? "Insufficient Live Runners" : "No Positive-EV Wager Identified — field too closely matched to find a real edge";
+      // "Too Close" = the engine generated nothing at all (near-ties / missing data blocked every bet).
+      // "Low Payout" = bets existed but none had a positive edge at the posted payouts.
+      let noBetReason = eligibleCands.length === 0 ? 'No Bet - Too Close' : 'No Bet - Low Payout';
+      scenario = liveRunners.length < 2 ? "Insufficient Live Runners"
+        : eligibleCands.length === 0 ? "No Wager Identified — field too closely matched to find a real edge"
+        : `No Wager Above the ${(MIN_EV_PER_DOLLAR * 100).toFixed(0)}% EV Floor — posted payouts too low for the modeled hit rates`;
       optionRows = [
-        { label: 'A', isPass: true, passReason: 'No Bet - Too Close' },
-        { label: 'B', isPass: true, passReason: 'No Bet - Too Close' }
+        { label: 'A', isPass: true, passReason: noBetReason },
+        { label: 'B', isPass: true, passReason: noBetReason }
       ];
     } else if (worthwhile.length === 0) {
-      scenario = `Positive EV Only on Thin-Margin Favorites — payout under ${MIN_PAYOUT_RATIO}x the stake`;
+      scenario = `EV Acceptable Only on Thin-Margin Favorites — payout under ${MIN_PAYOUT_RATIO}x the stake`;
       optionRows = [
         { label: 'A', isPass: true, passReason: 'No Bet - Low Payout' },
         { label: 'B', isPass: true, passReason: 'No Bet - Low Payout' }
@@ -1982,7 +2186,7 @@
       let best = byEv[0];
       let byHitRate = worthwhile.slice().sort((a, b) => b.hitProb - a.hitProb).find(c => c.type !== best.type) || byEv[1];
 
-      scenario = `Value Pick: ${best.type.replace('_', ' ')} (EV/$ = +${(best.evPerDollar * 100).toFixed(0)}%)` +
+      scenario = `Value Pick: ${best.type.replace('_', ' ')} (EV/$ = ${best.evPerDollar >= 0 ? '+' : ''}${(best.evPerDollar * 100).toFixed(0)}%)` +
         (byHitRate ? ` | Safety Pick: ${byHitRate.type.replace('_', ' ')} (${(byHitRate.hitProb * 100).toFixed(0)}% modeled hit rate)` : '');
 
       optionRows = [
@@ -1993,11 +2197,25 @@
       ];
     }
 
+    // Expanded-table rows: best candidate (by EV/$, same ranking as Option A) for every bet type/
+    // configuration the engine generated, minus the types already used by Option A/B.
+    let usedTypeLabels = new Set(optionRows.filter(o => !o.isPass).map(o => o.typeLabel));
+    let bestPerType = {};
+    candidates.forEach(c => {
+      if (!(c.cost > 0)) return;
+      let cur = bestPerType[c.typeLabel];
+      if (!cur || c.evPerDollar > cur.evPerDollar) bestPerType[c.typeLabel] = c;
+    });
+    let extraRows = Object.values(bestPerType)
+      .filter(c => !usedTypeLabels.has(c.typeLabel))
+      .sort((a, b) => b.hitProb - a.hitProb)
+      .map(c => ({ label: 'NOT RECOMMENDED', isExtra: true, isPass: false, stake: c.cost, typeLabel: c.typeLabel, horses: c.horses, payoutLow: c.payoutLow, payoutHigh: c.payoutHigh, hitProb: c.hitProb, isRealData: c.isRealData }));
+
     return {
       ruleAppliedMsg,
       leaderboard: runners,
       gaps: { gap12, gap23, gap34, gap45, gap13, gap14 },
-      wagerRecs: { scenario, optionRows },
+      wagerRecs: { scenario, optionRows, extraRows },
       wetnessTier,
       trackConditionRaw: cachedTrackCondition
     };
@@ -2237,13 +2455,16 @@
 
   function updateOverlay() {
     applyOverlayThemeCSS();
+    renderToggleButton();
     let existing = document.getElementById('ts-model-overlay');
     if (!existing) {
       existing = document.createElement('div');
       existing.id = 'ts-model-overlay';
-      existing.style.cssText = 'position:fixed;top:40px;right:20px;z-index:999999;padding:16px;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.5);width:min(620px, 94vw);min-width:300px;max-height:88vh;overflow-y:auto;border:2px solid #bd93f9;transform-origin:top right;';
+      existing.style.cssText = 'position:fixed;top:40px;right:20px;z-index:999999;padding:16px;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.5);width:min(' + currentWidth + 'px, 94vw);min-width:300px;max-height:88vh;overflow-y:auto;border:2px solid #bd93f9;transform-origin:top right;';
       document.body.appendChild(existing);
     }
+
+    existing.style.display = isOverlayVisible ? 'block' : 'none';
 
     let trackDisplay = getActiveTrackName().toUpperCase().replace(/"/g, '');
     let raceDisplay = String(getActiveRaceNum()).replace(/[^0-9]/g, '');
@@ -2257,7 +2478,6 @@
     let leaderboardRowsHtml = modelRes.leaderboard.map(h => {
       let nameStr = h.HORSE_NAME.replace(/"/g, '');
       let isScratched = h.IS_SCRATCHED || cachedScratchedMap[h.PROGRAM];
-      let pwrCellStyle = h.POWER_BONUS > 0 ? 'color:var(--ts-green);' : '';
       let wetCellStyle = h.WET_BONUS > 0 ? 'color:var(--ts-green);' : '';
 
       // Time-based persistence: a detected change stays highlighted for CHANGE_INDICATOR_DURATION_MS
@@ -2303,7 +2523,6 @@
           <td class="ts-num ts-muted">${h.BASE_SKILL.toFixed(2)}</td>
           <td class="ts-num ts-muted">${h.POST_BONUS.toFixed(2)}</td>
           <td class="ts-num ts-muted">${h.STYLE_BONUS.toFixed(2)}</td>
-          <td class="ts-num${pwrCellStyle ? '' : ' ts-muted'}" style="${pwrCellStyle}">${(h.POWER_BONUS || 0).toFixed(2)}</td>
           <td class="ts-num${wetCellStyle ? '' : ' ts-muted'}" style="${wetCellStyle}">${(h.WET_BONUS || 0).toFixed(2)}</td>
         </tr>`;
     }).join('');
@@ -2314,7 +2533,7 @@
         <div class="ts-table-wrap">
           <table class="ts-table ts-table-scroll">
             <thead><tr>
-              <th>Rk</th><th>#</th><th>Horse</th><th>Final</th><th>Base</th><th>Post</th><th>Style</th><th>Bonus</th><th>Wet Bonus</th>
+              <th>Rk</th><th>#</th><th>Horse</th><th>Final</th><th>Base</th><th>Post<br>Bonus</th><th>Style<br>Bonus</th><th>Wet<br>Bonus</th>
             </tr></thead>
             <tbody>${leaderboardRowsHtml}</tbody>
           </table>
@@ -2362,6 +2581,12 @@
           </div>
         </div>
 
+        <div style="display:flex;align-items:center;gap:6px;background:var(--ts-bg-code);padding:4px 8px;border-radius:6px;border:1px solid var(--ts-border-soft);margin-bottom:8px;">
+          <span class="ts-muted" style="font-size:10.5px;font-weight:700;">WIDTH</span>
+          <input type="range" id="ts-width-slider" min="500" max="1400" step="10" value="${currentWidth}" style="width:100%;cursor:pointer;accent-color:var(--ts-purple);">
+          <span id="ts-width-label" style="color:var(--ts-cyan);font-size:10.5px;font-weight:700;min-width:46px;text-align:right;">${currentWidth}px</span>
+        </div>
+
         <div style="display:flex;align-items:center;gap:8px;">
           <div class="ts-status-pill" style="flex:1;">
             <span style="color:var(--ts-green);font-weight:700;">${activeStartersCount}</span> Active Starters &nbsp;|&nbsp; <span style="color:var(--ts-red);font-weight:700;">${scratchedHorsesCount}</span> Scratched
@@ -2404,14 +2629,14 @@
               <th>Option</th><th>$</th><th>Type</th><th>#</th><th>Payout</th><th>Hit %</th>
             </tr></thead>
             <tbody>
-              ${modelRes.wagerRecs.optionRows.map(o => o.isPass ? `
+              ${modelRes.wagerRecs.optionRows.concat(wagerTableExpanded ? (modelRes.wagerRecs.extraRows || []) : []).map(o => o.isPass ? `
                 <tr>
                   <td>${o.label}</td>
                   <td class="ts-num ts-muted">—</td>
                   <td class="ts-muted" colspan="4">${o.passReason}</td>
                 </tr>` : `
                 <tr>
-                  <td>${o.label}</td>
+                  <td>${o.isExtra ? '<span style="color:var(--ts-red);font-weight:700;white-space:nowrap;font-size:11px;">NOT RECOMMENDED</span>' : o.label}</td>
                   <td class="ts-num">$${o.stake}</td>
                   <td style="white-space:nowrap;">${o.typeLabel}</td>
                   <td style="white-space:nowrap;">${o.horses}</td>
@@ -2422,6 +2647,10 @@
             </tbody>
           </table>
         </div>
+        ${(modelRes.wagerRecs.extraRows || []).length > 0 ? `
+        <div style="text-align:right;margin-top:0;line-height:1;">
+          <button id="ts-wager-expand-btn" title="${wagerTableExpanded ? 'Show only Option A/B' : 'Show all other bet types'}" style="background:none;border:none;padding:0 4px;margin:0;cursor:pointer;font-size:18px;line-height:1;font-weight:700;font-family:inherit;color:var(--ts-purple);">${wagerTableExpanded ? '−' : '+'}</button>
+        </div>` : ''}
       </div>
 
       ${dualWeightTestMode && cachedBreed === 'Thoroughbred' ? getWeightComparisonSectionHtml(calculateModelOutput('Thoroughbred'), calculateModelOutput('Special')) : ''}
@@ -2444,6 +2673,7 @@
       </div>
     `;
 
+    applyWidth(false);
     applyZoom();
   }
 
@@ -2467,17 +2697,9 @@
       ], '');
       if (payloadPostTime) cachedPostTime = payloadPostTime;
 
+      // Runs BEFORE this payload merges, so a reset never wipes the fresh data that triggered it.
       let urlData = parseTwinSpiresUrl();
-      if (urlData) {
-        if (urlData.raceNum && cachedRaceNum && urlData.raceNum !== cachedRaceNum) {
-          resetRaceData();
-          cachedRaceNum = urlData.raceNum;
-        }
-        if (urlData.trackName && cachedTrackName && urlData.trackName !== cachedTrackName && urlData.trackName !== "Unknown Track") {
-          resetRaceData();
-          cachedTrackName = urlData.trackName;
-        }
-      }
+      if (urlData) checkRaceChange(urlData.trackName, urlData.raceNum);
 
       let runners = findRunnersArray(data);
       if (runners && runners.length > 0) {
@@ -2485,6 +2707,7 @@
         let payloadTrack = getActiveTrackName(sample) || getActiveTrackName(data);
         let payloadRace = sample.raceNumber || data.raceNumber;
 
+        if (!urlData) checkRaceChange(payloadTrack, payloadRace); // payload identity only when the URL can't be parsed
         if (payloadTrack && payloadTrack !== "Unknown Track") cachedTrackName = payloadTrack;
         if (payloadRace) cachedRaceNum = payloadRace;
 
@@ -2498,6 +2721,7 @@
         let payloadTrack = getActiveTrackName(statsObj) || getActiveTrackName(data);
         let payloadRace = statsObj.raceNumber || data.raceNumber;
 
+        if (!urlData) checkRaceChange(payloadTrack, payloadRace); // payload identity only when the URL can't be parsed
         if (payloadTrack && payloadTrack !== "Unknown Track") cachedTrackName = payloadTrack;
         if (payloadRace) cachedRaceNum = payloadRace;
 
@@ -2561,6 +2785,5 @@
   applyLeftAlignmentCSS();
   applyOverlayThemeCSS();
   updateOverlay();
-  setTimeout(autoClickTabs, 400);
   console.log("Live Handicapping Model V25 Running - Scratched horses zeroed post-calculation!");
 })();
