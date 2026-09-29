@@ -482,36 +482,83 @@
   // TwinSpires doesn't fire a new request right away after navigating, stale data (comments
   // included) can sit there until one eventually does. Polling the URL directly closes that gap —
   // reset fires the instant navigation happens, regardless of network timing.
-  // Single source of truth for "did the race/track change?". Compares against activeRaceKey, which is
-  // ONLY written here (and by the Reset button) -- never by payload parsing. The old checks compared
-  // against cachedRaceNum/cachedTrackName, which every incoming payload overwrites, so by the time a
-  // check ran the "previous" value could already equal the new one and the reset was silently skipped
-  // (leaving Comments/Pools, which only re-send on a tab click, stale). Also compares normalized
-  // values, so 5 vs "5" can't cause a false mismatch. Any change in track OR race runs resetRaceData().
-  let activeRaceKey = '';
-  function buildRaceKey(track, race) {
-    let t = String(track || '').trim().toLowerCase();
-    let r = String(race || '').replace(/[^0-9]/g, '');
-    if (!t || t === 'unknown track' || !r) return '';
-    return t + '|' + r;
-  }
-  function checkRaceChange(payloadTrack, payloadRace) {
+  let lastWatchedUrl = window.location.href;
+  function watchForRaceChange() {
+    if (window.location.href === lastWatchedUrl) return;
+    lastWatchedUrl = window.location.href;
     let urlData = parseTwinSpiresUrl();
-    let track = urlData ? urlData.trackName : payloadTrack;
-    let race = urlData ? urlData.raceNum : payloadRace;
-    let key = buildRaceKey(track, race);
-    if (!key) return false;
-    if (!activeRaceKey) { activeRaceKey = key; return false; }
-    if (key === activeRaceKey) return false;
-    activeRaceKey = key;
-    resetRaceData();
-    if (track && String(track).toLowerCase() !== 'unknown track') cachedTrackName = track;
-    if (race) cachedRaceNum = race;
-    updateOverlay();
+    if (!urlData) return;
+    let changed = (urlData.raceNum && cachedRaceNum && urlData.raceNum !== cachedRaceNum) ||
+                  (urlData.trackName && cachedTrackName && urlData.trackName !== cachedTrackName && urlData.trackName !== "Unknown Track");
+    if (changed) {
+      resetRaceData();
+      cachedRaceNum = urlData.raceNum || cachedRaceNum;
+      cachedTrackName = urlData.trackName || cachedTrackName;
+      updateOverlay();
+      setTimeout(autoClickTabs, 400); // brief delay for the new race's page content to render
+    }
+  }
+  setInterval(watchForRaceChange, 1000);
+
+  // Best-effort auto-click through the data tabs after a race change, so they don't have to be
+  // clicked by hand every time. Matches on visible text the same way the manual-click listener
+  // already does — since the exact tab markup isn't something we can verify without seeing the
+  // live page, this may need adjusting if a given tab doesn't reliably get found/clicked.
+  //
+  // Visibility check uses bounding-rect + computed style rather than offsetParent — offsetParent
+  // is null for position:fixed/sticky elements even when fully visible in most browsers, a common
+  // gotcha for exactly the kind of sticky tab nav bar this is likely clicking on.
+  function isVisibleForClick(el) {
+    let rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return false;
+    let style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) return false;
     return true;
   }
-  function watchForRaceChange() { checkRaceChange(); }
-  setInterval(watchForRaceChange, 1000);
+
+  // Dispatches a full mouse event sequence rather than just calling .click() — some frameworks'
+  // handlers listen for mousedown/mouseup specifically and don't reliably fire on a synthetic
+  // .click() alone.
+  function simulateRealClick(el) {
+    ['mousedown', 'mouseup', 'click'].forEach(type => {
+      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    });
+  }
+
+  function autoClickTabs() {
+    // Genuinely interactive elements first (button/a/[role=tab]) — reduces the chance of matching
+    // a decoy text node (e.g. a heading) before the real clickable tab; broader tags as a fallback.
+    let priorityCandidates = document.querySelectorAll('button, a, [role="tab"]');
+    let fallbackCandidates = document.querySelectorAll('li, span, div');
+    REQUIRED_TABS.forEach(tab => {
+      if (tab === 'Comments') return; // no page tab for this one — handled by its own timeout logic
+      let found = false;
+      let candidatesSeenForThisTab = []; // diagnostic only
+      for (let group of [priorityCandidates, fallbackCandidates]) {
+        for (let el of group) {
+          let text = (el.innerText || el.textContent || '').trim();
+          let textLower = text.toLowerCase();
+          let tabLower = tab.toLowerCase();
+          // Exact match OR "contains" fallback — matches the same pattern the manual-click
+          // detection elsewhere in this file already uses, since real tab elements often carry
+          // extra whitespace, icons, or badge text alongside the label, which a strict equality
+          // check would silently fail to match.
+          if (textLower === tabLower || textLower.includes(tabLower)) {
+            let vis = isVisibleForClick(el);
+            candidatesSeenForThisTab.push({ tag: el.tagName, text, visible: vis, outerHTML: el.outerHTML.slice(0, 150) });
+            if (vis) {
+              simulateRealClick(el);
+              found = true;
+              break;
+            }
+          }
+        }
+        if (found) break;
+      }
+      // TEMPORARY DIAGNOSTIC — remove once tab auto-clicking is confirmed working reliably.
+      console.log(`[autoClickTabs] "${tab}": clicked=${found}`, candidatesSeenForThisTab);
+    });
+  }
 
   function startCollectionTicker() {
     if (collectionTicker) clearInterval(collectionTicker);
@@ -570,7 +617,6 @@
         if (urlData) {
           cachedTrackName = urlData.trackName;
           cachedRaceNum = urlData.raceNum;
-          activeRaceKey = buildRaceKey(urlData.trackName, urlData.raceNum);
         }
         resetRaceData();
         updateOverlay();
@@ -692,37 +738,6 @@
   // and as the fallback exacta payout estimator's discount. Validated against a real UK Haydock
   // WIN pool (~18% reproduced the track's displayed odds almost exactly).
   const TAKEOUT_RATE = 0.18;
-
-  // Race-specific takeout, backed out of the WIN pool: displayed odds = (pool x (1 - takeout)) / $ on
-  // horse - 1, so takeout = 1 - (odds + 1) x horse$ / pool. Median across active horses smooths
-  // breakage rounding and any horse capped at the site's max displayed odds. Falls back to the
-  // TAKEOUT_RATE constant when pool/odds data is missing, < 3 usable horses, or the result is
-  // implausible (outside 10-30%). Applied to WIN/PLACE/SHOW payouts (place/show have no displayed
-  // odds to solve from, so they borrow the win-pool figure -- straight pools usually share a rate).
-  // Trifecta ceiling intentionally stays on the constant: its takeout can't be derived from the site.
-  function getDerivedTakeout() {
-    if (!cachedWinPoolTotal || cachedWinPoolTotal <= 0) return null;
-    let samples = [];
-    Object.values(cachedHorsesMap).forEach(h => {
-      if (h.IS_SCRATCHED || cachedScratchedMap[h.PROGRAM]) return;
-      let entry = cachedPoolsMap[String(h.PROGRAM)];
-      let odds = parseOddsToDecimal(h.LIVE_ODDS);
-      if (!entry || !(entry.win > 0) || !isFinite(odds) || odds < 0) return;
-      let t = 1 - (odds + 1) * entry.win / cachedWinPoolTotal;
-      if (isFinite(t)) samples.push(t);
-    });
-    if (samples.length < 3) return null;
-    samples.sort((a, b) => a - b);
-    let mid = Math.floor(samples.length / 2);
-    let median = samples.length % 2 ? samples[mid] : (samples[mid - 1] + samples[mid]) / 2;
-    if (median < 0.10 || median > 0.30) return null;
-    return { rate: median, n: samples.length };
-  }
-
-  function getEffectiveTakeout() {
-    let d = getDerivedTakeout();
-    return d ? d.rate : TAKEOUT_RATE;
-  }
 
   // A bet must promise at least this much back per dollar risked (net of the stake itself) to be
   // worth recommending at all — regardless of EV. A heavy favorite to place/show can be technically
@@ -1084,7 +1099,7 @@
   function getWinPoolPayout(program) {
     let entry = cachedPoolsMap[String(program)];
     if (!entry || entry.win === null || entry.win <= 0 || !cachedWinPoolTotal) return null;
-    let netPool = cachedWinPoolTotal * (1 - getEffectiveTakeout());
+    let netPool = cachedWinPoolTotal * (1 - TAKEOUT_RATE);
     return netPool / entry.win;
   }
 
@@ -1110,7 +1125,7 @@
     if (stakes.some(s => s === null)) return null;
     let targetStake = stakes[0];
     let combinedStakes = stakes.reduce((a, b) => a + b, 0);
-    let netPool = cachedPlacePoolTotal * (1 - getEffectiveTakeout());
+    let netPool = cachedPlacePoolTotal * (1 - TAKEOUT_RATE);
     let profitPool = netPool - combinedStakes;
     if (profitPool <= 0) return null;
     let profitPerPlacer = profitPool / allPlacers.length;
@@ -1129,7 +1144,7 @@
     if (stakes.some(s => s === null)) return null;
     let targetStake = stakes[0];
     let combinedStakes = stakes.reduce((a, b) => a + b, 0);
-    let netPool = cachedShowPoolTotal * (1 - getEffectiveTakeout());
+    let netPool = cachedShowPoolTotal * (1 - TAKEOUT_RATE);
     let profitPool = netPool - combinedStakes;
     if (profitPool <= 0) return null;
     let profitPerPlacer = profitPool / allPlacers.length;
@@ -1269,9 +1284,8 @@
   // exacta base unit, and the takeout constant used across the payout formulas. Kept as a separate
   // small CSV block since it's a different schema than the per-horse rows or the meet/week IV stats.
   function getRaceWidePoolsCsv() {
-    let header = 'WIN_POOL_TOTAL,PLACE_POOL_TOTAL,SHOW_POOL_TOTAL,SHOW_POOL_AVAILABLE,POOLS_PERCENT_MODE_DETECTED,EXACTA_POOL_TOTAL,EXACTA_BASE_UNIT,TRACK_CONDITION,WETNESS_TIER,POST_TIME,TAKEOUT_RATE,DERIVED_TAKEOUT_RATE,DERIVED_TAKEOUT_N';
+    let header = 'WIN_POOL_TOTAL,PLACE_POOL_TOTAL,SHOW_POOL_TOTAL,SHOW_POOL_AVAILABLE,POOLS_PERCENT_MODE_DETECTED,EXACTA_POOL_TOTAL,EXACTA_BASE_UNIT,TRACK_CONDITION,WETNESS_TIER,POST_TIME,TAKEOUT_RATE';
     let wetnessTier = getWetnessTier(cachedTrackCondition);
-    let derivedTakeout = getDerivedTakeout();
     let row = [
       cachedWinPoolTotal || 0,
       cachedPlacePoolTotal || 0,
@@ -1283,9 +1297,7 @@
       cachedTrackCondition ? `"${cachedTrackCondition}"` : '""',
       wetnessTier,
       cachedPostTime ? `"${cachedPostTime}"` : '""',
-      TAKEOUT_RATE,
-      derivedTakeout ? derivedTakeout.rate.toFixed(4) : '',
-      derivedTakeout ? derivedTakeout.n : 0
+      TAKEOUT_RATE
     ].join(',');
     return `${header}\n${row}`;
   }
@@ -2554,14 +2566,23 @@
       ], '');
       if (payloadPostTime) cachedPostTime = payloadPostTime;
 
-      checkRaceChange();
+      let urlData = parseTwinSpiresUrl();
+      if (urlData) {
+        if (urlData.raceNum && cachedRaceNum && urlData.raceNum !== cachedRaceNum) {
+          resetRaceData();
+          cachedRaceNum = urlData.raceNum;
+        }
+        if (urlData.trackName && cachedTrackName && urlData.trackName !== cachedTrackName && urlData.trackName !== "Unknown Track") {
+          resetRaceData();
+          cachedTrackName = urlData.trackName;
+        }
+      }
 
       let runners = findRunnersArray(data);
       if (runners && runners.length > 0) {
         let sample = runners[0];
         let payloadTrack = getActiveTrackName(sample) || getActiveTrackName(data);
         let payloadRace = sample.raceNumber || data.raceNumber;
-        checkRaceChange(payloadTrack, payloadRace);
 
         if (payloadTrack && payloadTrack !== "Unknown Track") cachedTrackName = payloadTrack;
         if (payloadRace) cachedRaceNum = payloadRace;
@@ -2575,7 +2596,6 @@
         cachedStatsObj = statsObj;
         let payloadTrack = getActiveTrackName(statsObj) || getActiveTrackName(data);
         let payloadRace = statsObj.raceNumber || data.raceNumber;
-        checkRaceChange(payloadTrack, payloadRace);
 
         if (payloadTrack && payloadTrack !== "Unknown Track") cachedTrackName = payloadTrack;
         if (payloadRace) cachedRaceNum = payloadRace;
@@ -2639,5 +2659,6 @@
   startCollectionTicker();
   applyOverlayThemeCSS();
   updateOverlay();
+  setTimeout(autoClickTabs, 400);
   console.log("Live Mobile Handicapping Model V2 Running");
 })();
