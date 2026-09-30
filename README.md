@@ -1,11 +1,11 @@
-This is a handicapping model built as an extension to the TwinSpires web page. There is one for the windows desktop (I used Microsoft Edge dev tools) and one for iPhone Safari. 
+This is a handicapping model built as an extension to the TwinSpires web page. There is one for use on Windows desktop (I used Microsoft Edge dev tools) and one for iPhone Safari. 
 
 Instructions for Windows:
   -open TwinSpires and log in to your account
   -click on the racetrack and race # you would like it to analyze.
   -press Fn+F12 to open Dev tools in Edge
   -navigate to the "Console" tab
-  -copy the desktop code from this repository and past it in the console
+  -copy the desktop code from this repository and paste it in the console
   -press Enter
 
 Instructions for iPhone (mobile):
