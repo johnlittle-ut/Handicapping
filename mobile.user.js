@@ -1,5 +1,4 @@
 // ==UserScript==
-// ==UserScript==
 // @name         TwinSpires Mobile Handicapper
 // @namespace    http://tampermonkey.net/
 // @version      1.2
