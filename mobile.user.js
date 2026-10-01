@@ -1814,7 +1814,7 @@
       let ranked = liveRunners.slice().sort((a, b) =>
         (winProbs[b.PROGRAM] ? winProbs[b.PROGRAM].modelProb : 0) - (winProbs[a.PROGRAM] ? winProbs[a.PROGRAM].modelProb : 0)
       );
-      let c1 = ranked[0], c2 = ranked[1], c3 = ranked[2], c4 = ranked[3];
+      let c1 = ranked[0], c2 = ranked[1], c3 = ranked[2], c4 = ranked[3], c5 = ranked[4];
 
       // Uses win-probability ratio, not a raw score-point gap, so it scales correctly whether the
       // field is tightly bunched or widely spread (same reasoning as the rest of this engine).
@@ -1835,6 +1835,14 @@
       let c1c2Tie = !!(c1 && c2 && isNearTie(c1.PROGRAM, c2.PROGRAM));
       let c2c3Tie = !!(c2 && c3 && isNearTie(c2.PROGRAM, c3.PROGRAM));
       let c3c4Tie = !!(c3 && c4 && isNearTie(c3.PROGRAM, c4.PROGRAM));
+      let c4c5Tie = !!(c4 && c5 && isNearTie(c4.PROGRAM, c5.PROGRAM));
+
+      // BOUNDARY RULE (applies to every bet for Option A/B eligibility): the first horse NOT covered
+      // by a bet must not be a near-tie with the weakest horse the bet does cover — otherwise the
+      // bet leaves out a horse that is just as likely as the ones it includes. Per bet:
+      //   Win: c2 vs c1 | Place: c3 vs the horse | Show: c4 vs the horse | Straight: c3 vs c2 |
+      //   Box(2): c3 vs c2 | Box(3): c4 vs c3 | Wheel(3): c4 vs c3 | Wheel(4): c5 vs c4 |
+      //   Trifecta Box(3): c4 vs c3 | Trifecta Box(4): c5 vs c4
 
       // --- WIN on top model pick — defensible only when c1 is genuinely more likely than c2, not
       // just "above the field average." ---
@@ -1974,7 +1982,7 @@
           let wheelHorses = [c2, c3];
           if (nLegs === 3) { if (!c4) return; wheelHorses.push(c4); }
           let wants4 = !!(c4 && c3c4Tie);
-          let wheelEligible = !c1c2Tie && c2c3Tie && (nLegs === 3 ? wants4 : !wants4);
+          let wheelEligible = !c1c2Tie && c2c3Tie && (nLegs === 3 ? (wants4 && !c4c5Tie) : !wants4);
 
           let legs = wheelHorses.map(h => ({
             horse: h, p: exactaOrderProb(c1.PROGRAM, h.PROGRAM), pay: exactaPayoutEstimate(c1.PROGRAM, h.PROGRAM)
@@ -2005,7 +2013,7 @@
         [2, 3].forEach(n => {
           if (n === 3 && !c3) return;
           let boxHorses = n === 3 ? [c1, c2, c3] : [c1, c2];
-          let boxEligible = c1c2Tie && (n === 3 ? c2c3Tie : !(c3 && c2c3Tie));
+          let boxEligible = c1c2Tie && (n === 3 ? (c2c3Tie && !c3c4Tie) : !(c3 && c2c3Tie));
 
           let progs = boxHorses.map(h => h.PROGRAM);
           let combos = [];
@@ -2072,7 +2080,7 @@
           });
 
           if (triAllReal) {
-            let triEligible = cachedTrifectaPoolTotal > 0 && c1c2Tie && c2c3Tie && (n === 4 ? wants4 : !wants4) && triPBox >= MIN_TRIFECTA_HIT_PROB;
+            let triEligible = cachedTrifectaPoolTotal > 0 && c1c2Tie && c2c3Tie && (n === 4 ? (wants4 && !c4c5Tie) : !c3c4Tie) && triPBox >= MIN_TRIFECTA_HIT_PROB;
             let triEv = triExpectedPayout - triCost;
             candidates.push({
               type: 'TRIFECTA_BOX', typeLabel: `Trifecta Box (${n})`, horses: boxProgs.map(p => `#${p}`).join(', '),
