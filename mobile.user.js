@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwinSpires Mobile Handicapper
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      2.2
 // @description  Floating Handicapping Overlay for TwinSpires Mobile
 // @match        https://*.twinspires.com/*
 // @run-at       document-end
@@ -10,6 +10,13 @@
 
 (function launchTwinSpiresMobileModelV2() {
   let currentZoom = 1.0;
+  let currentHeight = Math.round(window.innerHeight * 0.85); // panel max height in px (before zoom); matches the original 85vh until changed
+  let isDarkMode = false; // false = Sky Blue + Navy (light, default), true = Turf Green (dark); toggled in the status row
+  // Drag-preview outline colors can't use the overlay's CSS variables (the outline lives outside it), so they follow the theme here.
+  function outlineCss() {
+    let rgb = isDarkMode ? '217,180,74' : '29,78,137';
+    return `position:fixed;z-index:1000000;border:2px dashed rgb(${rgb});background:rgba(${rgb},0.15);pointer-events:none;border-radius:8px;box-shadow:0 0 15px rgba(${rgb},0.4);transition:none;`;
+  }
   let isDragging = false;
   let dragOffsetX = 0;
   let dragOffsetY = 0;
@@ -69,21 +76,24 @@
     style.id = 'ts-dracula-theme';
     style.textContent = `
       #ts-model-overlay {
-        --ts-bg: #282a36;
-        --ts-bg-panel: #21222c;
-        --ts-bg-code: #191a21;
-        --ts-border: #44475a;
-        --ts-border-soft: #383a4a;
-        --ts-border-accent: #6272a4;
-        --ts-fg: #f8f8f2;
-        --ts-fg-muted: #8892b0;
-        --ts-purple: #bd93f9;
-        --ts-cyan: #8be9fd;
-        --ts-green: #50fa7b;
-        --ts-red: #ff5555;
-        --ts-yellow: #f1fa8c;
-        --ts-orange: #ffb86c;
-        --ts-pink: #ff79c6;
+        --ts-bg: #eaf0f6;
+        --ts-bg-panel: #ffffff;
+        --ts-bg-code: #dce6f0;
+        --ts-border: #bccbdb;
+        --ts-border-soft: #d3deea;
+        --ts-border-accent: #2c5d91;
+        --ts-fg: #17212c;
+        --ts-fg-muted: #5b6c7e;
+        --ts-purple: #1d4e89;
+        --ts-cyan: #1d4e89;
+        --ts-green: #1a7f3c;
+        --ts-red: #c0392b;
+        --ts-yellow: #7a6110;
+        --ts-orange: #a85a12;
+        --ts-pink: #5a4a7a;
+        --ts-btn-text: #ffffff;
+        --ts-stripe: rgba(23,33,44,0.04);
+        --ts-red-bg: rgba(192,57,43,0.10);
         --ts-font-mono: 'Cascadia Code','Fira Code','JetBrains Mono',ui-monospace,SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;
         --ts-font-ui: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
 
@@ -95,6 +105,28 @@
         -webkit-font-smoothing: antialiased;
       }
       #ts-model-overlay * { box-sizing: border-box; }
+
+      /* Dark mode (Turf Green) — overrides the light Sky Blue variables above */
+      #ts-model-overlay.ts-dark {
+        --ts-bg: #17331f;
+        --ts-bg-panel: #112a19;
+        --ts-bg-code: #0c2013;
+        --ts-border: #2f5a3d;
+        --ts-border-soft: #25472f;
+        --ts-border-accent: #3f7a52;
+        --ts-fg: #f3f1e6;
+        --ts-fg-muted: #9db8a4;
+        --ts-purple: #d9b44a;
+        --ts-cyan: #bfe3c8;
+        --ts-green: #6be28d;
+        --ts-red: #ff7a6b;
+        --ts-yellow: #f0e08a;
+        --ts-orange: #e8a65c;
+        --ts-pink: #e9c9a0;
+        --ts-btn-text: #1a2a10;
+        --ts-stripe: rgba(243,241,230,0.04);
+        --ts-red-bg: rgba(255,122,107,0.12);
+      }
 
       #ts-model-overlay .ts-panel {
         background: var(--ts-bg-panel);
@@ -145,7 +177,7 @@
         color: var(--ts-fg);
       }
       #ts-model-overlay .ts-btn-move { color: var(--ts-yellow); cursor: move; }
-      #ts-model-overlay .ts-btn-reset { background: var(--ts-purple); color: #282a36; border-color: var(--ts-purple); }
+      #ts-model-overlay .ts-btn-reset { background: var(--ts-purple); color: var(--ts-btn-text); border-color: var(--ts-purple); }
       #ts-model-overlay .ts-status-pill {
         color: var(--ts-fg-muted);
         font-size: 11.5px;
@@ -158,6 +190,7 @@
       #ts-model-overlay .ts-toggle-row {
         display: flex; align-items: center; gap: 6px;
         font-size: 10px; color: var(--ts-fg-muted); font-weight: 700; white-space: nowrap;
+        margin: 0; padding: 0; min-height: 0; line-height: 1;
       }
       #ts-model-overlay .ts-toggle-switch {
         position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0;
@@ -172,21 +205,21 @@
         background: var(--ts-fg); border-radius: 50%; transition: transform 0.15s ease;
       }
       #ts-model-overlay .ts-toggle-switch input:checked + .ts-toggle-slider { background: var(--ts-yellow); }
-      #ts-model-overlay .ts-toggle-switch input:checked + .ts-toggle-slider::before { transform: translateX(14px); background: #282a36; }
+      #ts-model-overlay .ts-toggle-switch input:checked + .ts-toggle-slider::before { transform: translateX(14px); background: var(--ts-btn-text); }
 
       /* Zoom slider — larger track and thumb than the browser default, sized for touch rather
          than mouse precision. The row this sits in gives it full width (see updateOverlay). */
-      #ts-model-overlay #ts-zoom-slider {
+      #ts-model-overlay #ts-zoom-slider, #ts-model-overlay #ts-height-slider {
         -webkit-appearance: none; appearance: none;
         height: 6px; border-radius: 3px; background: var(--ts-border-soft); outline: none;
       }
-      #ts-model-overlay #ts-zoom-slider::-webkit-slider-thumb {
+      #ts-model-overlay #ts-zoom-slider::-webkit-slider-thumb, #ts-model-overlay #ts-height-slider::-webkit-slider-thumb {
         -webkit-appearance: none; appearance: none;
         width: 26px; height: 26px; border-radius: 50%;
         background: var(--ts-purple); border: 2px solid var(--ts-fg);
         cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,0.5);
       }
-      #ts-model-overlay #ts-zoom-slider::-moz-range-thumb {
+      #ts-model-overlay #ts-zoom-slider::-moz-range-thumb, #ts-model-overlay #ts-height-slider::-moz-range-thumb {
         width: 26px; height: 26px; border-radius: 50%; border: 2px solid var(--ts-fg);
         background: var(--ts-purple); cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,0.5);
       }
@@ -208,7 +241,7 @@
         padding: 5px 7px; border-bottom: 1px solid var(--ts-border); white-space: nowrap;
       }
       #ts-model-overlay .ts-table td { padding: 5px 7px; border-bottom: 1px solid var(--ts-border-soft); vertical-align: top; color: var(--ts-fg); }
-      #ts-model-overlay .ts-table tbody tr:nth-child(even) { background: rgba(248,248,242,0.03); }
+      #ts-model-overlay .ts-table tbody tr:nth-child(even) { background: var(--ts-stripe); }
       #ts-model-overlay .ts-table .ts-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
       #ts-model-overlay .ts-table .ts-horse-cell { white-space: normal; min-width: 130px; }
       #ts-model-overlay .ts-table tr.ts-scratched td { opacity: 0.55; }
@@ -302,7 +335,7 @@
     if (!outline) {
       outline = document.createElement('div');
       outline.id = 'ts-zoom-outline';
-      outline.style.cssText = 'position:fixed;z-index:1000000;border:2px dashed #bd93f9;background:rgba(189,147,249,0.15);pointer-events:none;border-radius:8px;box-shadow:0 0 15px rgba(189,147,249,0.4);transition:none;';
+      outline.style.cssText = outlineCss();
       document.body.appendChild(outline);
     }
 
@@ -317,6 +350,47 @@
     outline.style.width = `${previewW}px`;
     outline.style.height = `${previewH}px`;
     outline.style.display = 'block';
+  }
+
+  // Height-slider preview: the panel's top edge stays put (transform-origin is top left), so the
+  // outline grows/shrinks downward. The slider sets a max height, so the real panel is only as tall
+  // as its content when that is shorter.
+  function updateHeightPreview(previewHeightPx) {
+    let overlay = document.getElementById('ts-model-overlay');
+    if (!overlay) return;
+
+    let label = document.getElementById('ts-height-label');
+    if (label) label.innerText = `${Math.round(previewHeightPx)}px`;
+
+    let outline = document.getElementById('ts-zoom-outline');
+    if (!outline) {
+      outline = document.createElement('div');
+      outline.id = 'ts-zoom-outline';
+      outline.style.cssText = outlineCss();
+      document.body.appendChild(outline);
+    }
+
+    let rect = overlay.getBoundingClientRect();
+    let effectiveH = Math.min(previewHeightPx, overlay.scrollHeight + 4);
+    let previewH = effectiveH * currentZoom;
+
+    outline.style.top = `${rect.top}px`;
+    outline.style.left = `${rect.left}px`;
+    outline.style.width = `${rect.width}px`;
+    outline.style.height = `${previewH}px`;
+    outline.style.display = 'block';
+  }
+
+  function applyHeight() {
+    let overlay = document.getElementById('ts-model-overlay');
+    if (overlay) {
+      overlay.style.maxHeight = `${currentHeight}px`;
+      let label = document.getElementById('ts-height-label');
+      if (label) label.innerText = `${currentHeight}px`;
+      let slider = document.getElementById('ts-height-slider');
+      if (slider && parseFloat(slider.value) !== currentHeight) slider.value = currentHeight;
+    }
+    removeZoomPreview();
   }
 
   function removeZoomPreview() {
@@ -361,12 +435,12 @@
         min-height: 60px !important;
         max-height: 60px !important;
         border-radius: 50% !important;
-        border: 3px solid #6272a4 !important;
+        border: 3px solid ${isDarkMode ? '#3f7a52' : '#2c5d91'} !important;
         padding: 0 !important;
         margin: 0 !important;
         overflow: hidden !important;
         cursor: pointer !important;
-        background-color: #191a21 !important;
+        background-color: ${isDarkMode ? '#0c2013' : '#dce6f0'} !important;
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
@@ -400,7 +474,7 @@
       }
 
       button#ts-toggle-btn.ts-toggle-btn.active {
-        border-color: #bd93f9 !important;
+        border-color: ${isDarkMode ? '#d9b44a' : '#1d4e89'} !important;
         opacity: 1.0 !important;
       }
     `;
@@ -529,7 +603,24 @@
         let previewVal = parseFloat(e.target.value) / 100.0;
         updateZoomPreview(previewVal);
       }
+      if (e.target && e.target.id === 'ts-height-slider') {
+        updateHeightPreview(parseFloat(e.target.value));
+      }
     });
+
+    function commitHeight(e) {
+      if (e.target && e.target.id === 'ts-height-slider') {
+        let slider = document.getElementById('ts-height-slider');
+        if (slider) {
+          currentHeight = Math.round(parseFloat(slider.value));
+          applyHeight();
+        }
+      }
+    }
+
+    document.addEventListener('change', commitHeight);
+    document.addEventListener('mouseup', commitHeight);
+    document.addEventListener('touchend', commitHeight);
 
     function commitZoom(e) {
       if (e.target && e.target.id === 'ts-zoom-slider') {
@@ -548,6 +639,12 @@
     document.addEventListener('change', function(e) {
       if (e.target && e.target.id === 'ts-weight-compare-toggle') {
         dualWeightTestMode = e.target.checked;
+        updateOverlay();
+      }
+      if (e.target && e.target.id === 'ts-theme-toggle') {
+        isDarkMode = e.target.checked;
+        let staleOutline = document.getElementById('ts-zoom-outline'); // rebuilt in the new theme's color on next slider drag
+        if (staleOutline) staleOutline.remove();
         updateOverlay();
       }
     });
@@ -2407,11 +2504,12 @@
       let estHeight = Math.min(window.innerHeight * 0.85, 600);
       let centeredLeft = Math.max(10, (window.innerWidth - estWidth) / 2);
       let centeredTop = Math.max(20, (window.innerHeight - estHeight) / 2);
-      existing.style.cssText = `position:fixed;top:${centeredTop}px;left:${centeredLeft}px;z-index:999999;padding:16px;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.5);width:min(400px, 92vw);min-width:280px;max-height:85vh;overflow-y:auto;border:2px solid #bd93f9;transform-origin:top left;`;
+      existing.style.cssText = `position:fixed;top:${centeredTop}px;left:${centeredLeft}px;z-index:999999;padding:16px;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.5);width:min(400px, 92vw);min-width:280px;max-height:${currentHeight}px;overflow-y:auto;border:2px solid var(--ts-purple);transform-origin:top left;`;
       document.body.appendChild(existing);
     }
 
     existing.style.display = isOverlayVisible ? 'block' : 'none';
+    existing.classList.toggle('ts-dark', isDarkMode);
 
     let trackDisplay = getActiveTrackName().toUpperCase().replace(/"/g, '');
     let raceDisplay = String(getActiveRaceNum()).replace(/[^0-9]/g, '');
@@ -2421,6 +2519,17 @@
     let condTag = cachedTrackCondition ? ` (${cachedTrackCondition.toUpperCase()})` : '';
 
     let modelRes = calculateModelOutput();
+
+    // Low-data warning: a normal race's top score lands well above 60; a top score below that means whole
+    // scoring components are empty across the field (e.g. a field of first-time starters), so the ranking
+    // is close to random. Requires a nonzero score so it doesn't fire while data is still loading.
+    let topActiveScore = Math.max(0, ...modelRes.leaderboard
+      .filter(h => !h.IS_SCRATCHED && !cachedScratchedMap[h.PROGRAM])
+      .map(h => h.FINAL_SCORE || 0));
+    let lowScoreWarningHtml = (activeStartersCount > 0 && topActiveScore > 0 && topActiveScore < 60) ? `
+        <div style="margin-top:8px;padding:6px 8px;border:1px solid var(--ts-red);border-radius:6px;background:var(--ts-red-bg);color:var(--ts-red);font-size:11px;font-weight:700;line-height:1.35;">
+          WARNING: Highest score is below 60. Check for missing data. Model can account for small amounts of missing data but a race full of first time starters with no past performance data will yield random results. Wagering on this race is not recommended.
+        </div>` : '';
 
     let leaderboardRowsHtml = modelRes.leaderboard.map(h => {
       let nameStr = h.HORSE_NAME.replace(/"/g, '');
@@ -2529,10 +2638,17 @@
           <span id="ts-zoom-label" style="color:var(--ts-cyan);font-size:10.5px;font-weight:700;min-width:36px;text-align:right;">${Math.round(currentZoom * 100)}%</span>
         </div>
 
-        <div style="display:flex;align-items:center;gap:8px;">
-          <div class="ts-status-pill" style="flex:1;">
-            <span style="color:var(--ts-green);font-weight:700;">${activeStartersCount}</span> Active Starters &nbsp;|&nbsp; <span style="color:var(--ts-red);font-weight:700;">${scratchedHorsesCount}</span> Scratched
+        <div style="display:flex;align-items:center;gap:8px;background:var(--ts-bg-code);padding:6px 10px;border-radius:6px;border:1px solid var(--ts-border-soft);margin-bottom:8px;">
+          <span class="ts-muted" style="font-size:10.5px;font-weight:700;">HEIGHT</span>
+          <input type="range" id="ts-height-slider" min="300" max="2400" step="10" value="${currentHeight}" style="flex:1;cursor:pointer;accent-color:var(--ts-purple);">
+          <span id="ts-height-label" style="color:var(--ts-cyan);font-size:10.5px;font-weight:700;min-width:46px;text-align:right;">${currentHeight}px</span>
+        </div>
+
+        <div style="display:flex;align-items:stretch;gap:8px;">
+          <div class="ts-status-pill" style="flex:1;display:flex;align-items:center;justify-content:center;">
+            <span style="color:var(--ts-green);font-weight:700;">${activeStartersCount}</span>&nbsp;Active Starters &nbsp;|&nbsp; <span style="color:var(--ts-red);font-weight:700;">${scratchedHorsesCount}</span>&nbsp;Scratched
           </div>
+          <div style="display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:6px;">
           ${cachedBreed === 'Thoroughbred' ? `
           <label class="ts-toggle-row" title="Compare Thoroughbred vs Special weights for this race — for researching whether a track might benefit from a stronger live-odds weight">
             <span class="ts-toggle-switch">
@@ -2542,7 +2658,16 @@
             Wt Compare
           </label>
           ` : ''}
+          <label class="ts-toggle-row" title="Switch between Sky Blue (light) and Turf Green (dark)">
+            <span class="ts-toggle-switch">
+              <input type="checkbox" id="ts-theme-toggle" ${isDarkMode ? 'checked' : ''}>
+              <span class="ts-toggle-slider"></span>
+            </span>
+            Dark Mode
+          </label>
+          </div>
         </div>
+        ${lowScoreWarningHtml}
       </div>
 
       ${getLoaderSectionHtml()}
