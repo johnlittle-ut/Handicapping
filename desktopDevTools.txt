@@ -1,6 +1,13 @@
 (function launchTwinSpiresVariableInspectorV25() {
   let currentZoom = 1.0;
   let currentWidth = 860; // desktop panel width in px (before zoom); capped at 94vw when applied
+  let currentHeight = Math.round(window.innerHeight * 0.88); // desktop panel max height in px (before zoom); matches the original 88vh until changed
+  let isDarkMode = false; // false = Sky Blue + Navy (light, default), true = Turf Green (dark); toggled in the status row
+  // Drag-preview outline colors can't use the overlay's CSS variables (the outline lives outside it), so they follow the theme here.
+  function outlineCss() {
+    let rgb = isDarkMode ? '217,180,74' : '29,78,137';
+    return `position:fixed;z-index:1000000;border:2px dashed rgb(${rgb});background:rgba(${rgb},0.15);pointer-events:none;border-radius:8px;box-shadow:0 0 15px rgba(${rgb},0.4);transition:none;`;
+  }
   let isDragging = false;
   let dragOffsetX = 0;
   let dragOffsetY = 0;
@@ -26,6 +33,10 @@
   // tab-click-based "loaded" signal fires).
   const SCORING_NUM_FIELDS = ['PRM_PWR', 'AVG_SPD', 'BACK_SPD', 'SPD_LR', 'AVG_CLS', 'LAST_CLS', 'AVG_DIST_SPD', 'BEST_SPD', 'W_JKY', 'W_TRN', 'E1', 'E2', 'LP', 'DAYS_OFF'];
 
+  // Model version label — stamped on every Research Export race row so logged races can be grouped
+  // by the model version that produced them. Matches the version column in the Testing workbook.
+  const MODEL_VERSION = 'v2.2';
+
   // ===== TEMPORARY BACKTESTING FEATURE =====
   // Runs the model twice per race (Thoroughbred/default weights AND Special weights, regardless
   // of which set the track would normally auto-select) and shows both leaderboards side by side,
@@ -39,6 +50,7 @@
   // Embedded Horse Image URL for the show/hide toggle button (same as mobile)
   const HORSE_IMAGE_URL = 'https://raw.githubusercontent.com/littlejohn2201/handicapping2.0/main/apple-touch-icon.png';
   let wagerTableExpanded = false; // user preference: show all bet types beyond Option A/B (persists across races)
+  let userSelectedWagerKey = null; // wager ticked in the Wager Recommendations table (typeLabel|horses); one per race, cleared on race change
   let loadedTabs = {
     'Summary': false,
     'Advanced': false,
@@ -87,21 +99,24 @@
     style.id = 'ts-dracula-theme';
     style.textContent = `
       #ts-model-overlay {
-        --ts-bg: #282a36;
-        --ts-bg-panel: #21222c;
-        --ts-bg-code: #191a21;
-        --ts-border: #44475a;
-        --ts-border-soft: #383a4a;
-        --ts-border-accent: #6272a4;
-        --ts-fg: #f8f8f2;
-        --ts-fg-muted: #8892b0;
-        --ts-purple: #bd93f9;
-        --ts-cyan: #8be9fd;
-        --ts-green: #50fa7b;
-        --ts-red: #ff5555;
-        --ts-yellow: #f1fa8c;
-        --ts-orange: #ffb86c;
-        --ts-pink: #ff79c6;
+        --ts-bg: #eaf0f6;
+        --ts-bg-panel: #ffffff;
+        --ts-bg-code: #dce6f0;
+        --ts-border: #bccbdb;
+        --ts-border-soft: #d3deea;
+        --ts-border-accent: #2c5d91;
+        --ts-fg: #17212c;
+        --ts-fg-muted: #5b6c7e;
+        --ts-purple: #1d4e89;
+        --ts-cyan: #1d4e89;
+        --ts-green: #1a7f3c;
+        --ts-red: #c0392b;
+        --ts-yellow: #7a6110;
+        --ts-orange: #a85a12;
+        --ts-pink: #5a4a7a;
+        --ts-btn-text: #ffffff;
+        --ts-stripe: rgba(23,33,44,0.04);
+        --ts-red-bg: rgba(192,57,43,0.10);
         --ts-font-mono: 'Cascadia Code','Fira Code','JetBrains Mono',ui-monospace,SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;
         --ts-font-ui: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
 
@@ -113,6 +128,28 @@
         -webkit-font-smoothing: antialiased;
       }
       #ts-model-overlay * { box-sizing: border-box; }
+
+      /* Dark mode (Turf Green) — overrides the light Sky Blue variables above */
+      #ts-model-overlay.ts-dark {
+        --ts-bg: #17331f;
+        --ts-bg-panel: #112a19;
+        --ts-bg-code: #0c2013;
+        --ts-border: #2f5a3d;
+        --ts-border-soft: #25472f;
+        --ts-border-accent: #3f7a52;
+        --ts-fg: #f3f1e6;
+        --ts-fg-muted: #9db8a4;
+        --ts-purple: #d9b44a;
+        --ts-cyan: #bfe3c8;
+        --ts-green: #6be28d;
+        --ts-red: #ff7a6b;
+        --ts-yellow: #f0e08a;
+        --ts-orange: #e8a65c;
+        --ts-pink: #e9c9a0;
+        --ts-btn-text: #1a2a10;
+        --ts-stripe: rgba(243,241,230,0.04);
+        --ts-red-bg: rgba(255,122,107,0.12);
+      }
 
       #ts-model-overlay .ts-panel {
         background: var(--ts-bg-panel);
@@ -163,7 +200,7 @@
         color: var(--ts-fg);
       }
       #ts-model-overlay .ts-btn-move { color: var(--ts-yellow); cursor: move; }
-      #ts-model-overlay .ts-btn-reset { background: var(--ts-purple); color: #282a36; border-color: var(--ts-purple); }
+      #ts-model-overlay .ts-btn-reset { background: var(--ts-purple); color: var(--ts-btn-text); border-color: var(--ts-purple); }
       #ts-model-overlay .ts-status-pill {
         color: var(--ts-fg-muted);
         font-size: 11.5px;
@@ -176,6 +213,7 @@
       #ts-model-overlay .ts-toggle-row {
         display: flex; align-items: center; gap: 6px;
         font-size: 10px; color: var(--ts-fg-muted); font-weight: 700; white-space: nowrap;
+        margin: 0; padding: 0; min-height: 0; line-height: 1;
       }
       #ts-model-overlay .ts-toggle-switch {
         position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0;
@@ -190,7 +228,7 @@
         background: var(--ts-fg); border-radius: 50%; transition: transform 0.15s ease;
       }
       #ts-model-overlay .ts-toggle-switch input:checked + .ts-toggle-slider { background: var(--ts-yellow); }
-      #ts-model-overlay .ts-toggle-switch input:checked + .ts-toggle-slider::before { transform: translateX(14px); background: #282a36; }
+      #ts-model-overlay .ts-toggle-switch input:checked + .ts-toggle-slider::before { transform: translateX(14px); background: var(--ts-btn-text); }
       #ts-model-overlay .ts-badge {
         font-size: 9.5px;
         font-weight: 700;
@@ -209,7 +247,7 @@
         padding: 5px 7px; border-bottom: 1px solid var(--ts-border); white-space: nowrap;
       }
       #ts-model-overlay .ts-table td { padding: 5px 7px; border-bottom: 1px solid var(--ts-border-soft); vertical-align: top; color: var(--ts-fg); }
-      #ts-model-overlay .ts-table tbody tr:nth-child(even) { background: rgba(248,248,242,0.03); }
+      #ts-model-overlay .ts-table tbody tr:nth-child(even) { background: var(--ts-stripe); }
       #ts-model-overlay .ts-table .ts-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
       #ts-model-overlay .ts-table .ts-horse-cell { white-space: normal; min-width: 130px; }
       #ts-model-overlay .ts-table tr.ts-scratched td { opacity: 0.55; }
@@ -303,7 +341,7 @@
     if (!outline) {
       outline = document.createElement('div');
       outline.id = 'ts-zoom-outline';
-      outline.style.cssText = 'position:fixed;z-index:1000000;border:2px dashed #bd93f9;background:rgba(189,147,249,0.15);pointer-events:none;border-radius:8px;box-shadow:0 0 15px rgba(189,147,249,0.4);transition:none;';
+      outline.style.cssText = outlineCss();
       document.body.appendChild(outline);
     }
 
@@ -333,7 +371,7 @@
     if (!outline) {
       outline = document.createElement('div');
       outline.id = 'ts-zoom-outline';
-      outline.style.cssText = 'position:fixed;z-index:1000000;border:2px dashed #bd93f9;background:rgba(189,147,249,0.15);pointer-events:none;border-radius:8px;box-shadow:0 0 15px rgba(189,147,249,0.4);transition:none;';
+      outline.style.cssText = outlineCss();
       document.body.appendChild(outline);
     }
 
@@ -363,6 +401,46 @@
       if (label) label.innerText = `${currentWidth}px`;
       let slider = document.getElementById('ts-width-slider');
       if (slider && parseFloat(slider.value) !== currentWidth) slider.value = currentWidth;
+    }
+    removeZoomPreview();
+  }
+
+  // Height-slider preview: the panel's top edge stays put, so the outline grows/shrinks downward.
+  // The slider sets a max height, so the real panel is only as tall as its content when that is shorter.
+  function updateHeightPreview(previewHeightPx) {
+    let overlay = document.getElementById('ts-model-overlay');
+    if (!overlay) return;
+
+    let label = document.getElementById('ts-height-label');
+    if (label) label.innerText = `${Math.round(previewHeightPx)}px`;
+
+    let outline = document.getElementById('ts-zoom-outline');
+    if (!outline) {
+      outline = document.createElement('div');
+      outline.id = 'ts-zoom-outline';
+      outline.style.cssText = outlineCss();
+      document.body.appendChild(outline);
+    }
+
+    let rect = overlay.getBoundingClientRect();
+    let effectiveH = Math.min(previewHeightPx, overlay.scrollHeight + 4);
+    let previewH = effectiveH * currentZoom;
+
+    outline.style.top = `${rect.top}px`;
+    outline.style.left = `${rect.left}px`;
+    outline.style.width = `${rect.width}px`;
+    outline.style.height = `${previewH}px`;
+    outline.style.display = 'block';
+  }
+
+  function applyHeight() {
+    let overlay = document.getElementById('ts-model-overlay');
+    if (overlay) {
+      overlay.style.maxHeight = `${currentHeight}px`;
+      let label = document.getElementById('ts-height-label');
+      if (label) label.innerText = `${currentHeight}px`;
+      let slider = document.getElementById('ts-height-slider');
+      if (slider && parseFloat(slider.value) !== currentHeight) slider.value = currentHeight;
     }
     removeZoomPreview();
   }
@@ -409,12 +487,12 @@
         min-height: 60px !important;
         max-height: 60px !important;
         border-radius: 50% !important;
-        border: 3px solid #6272a4 !important;
+        border: 3px solid ${isDarkMode ? '#3f7a52' : '#2c5d91'} !important;
         padding: 0 !important;
         margin: 0 !important;
         overflow: hidden !important;
         cursor: pointer !important;
-        background-color: #191a21 !important;
+        background-color: ${isDarkMode ? '#0c2013' : '#dce6f0'} !important;
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
@@ -448,7 +526,7 @@
       }
 
       button#ts-toggle-btn.ts-toggle-btn.active {
-        border-color: #bd93f9 !important;
+        border-color: ${isDarkMode ? '#d9b44a' : '#1d4e89'} !important;
         opacity: 1.0 !important;
       }
     `;
@@ -503,6 +581,8 @@
     cachedShowPoolTotal = 0;
     cachedShowPoolAvailable = false;
     cachedPoolsWasPercentMode = false;
+    cachedResultsList = [];
+    userSelectedWagerKey = null;
     REQUIRED_TABS.forEach(tab => loadedTabs[tab] = false);
     previousRankScoreMap = {};
     lastFieldFingerprint = null;
@@ -580,7 +660,24 @@
       if (e.target && e.target.id === 'ts-width-slider') {
         updateWidthPreview(parseFloat(e.target.value));
       }
+      if (e.target && e.target.id === 'ts-height-slider') {
+        updateHeightPreview(parseFloat(e.target.value));
+      }
     });
+
+    function commitHeight(e) {
+      if (e.target && e.target.id === 'ts-height-slider') {
+        let slider = document.getElementById('ts-height-slider');
+        if (slider) {
+          currentHeight = Math.round(parseFloat(slider.value));
+          applyHeight();
+        }
+      }
+    }
+
+    document.addEventListener('change', commitHeight);
+    document.addEventListener('mouseup', commitHeight);
+    document.addEventListener('touchend', commitHeight);
 
     function commitWidth(e) {
       if (e.target && e.target.id === 'ts-width-slider') {
@@ -613,6 +710,16 @@
     document.addEventListener('change', function(e) {
       if (e.target && e.target.id === 'ts-weight-compare-toggle') {
         dualWeightTestMode = e.target.checked;
+        updateOverlay();
+      }
+      if (e.target && e.target.id === 'ts-theme-toggle') {
+        isDarkMode = e.target.checked;
+        let staleOutline = document.getElementById('ts-zoom-outline'); // rebuilt in the new theme's color on next slider drag
+        if (staleOutline) staleOutline.remove();
+        updateOverlay();
+      }
+      if (e.target && e.target.classList && e.target.classList.contains('ts-wager-pick')) {
+        userSelectedWagerKey = e.target.checked ? e.target.getAttribute('data-wager-key') : null; // only one at a time
         updateOverlay();
       }
     });
@@ -660,21 +767,6 @@
         }).catch(() => {});
       }
 
-      if (e.target.id === 'ts-copy-audit-btn') {
-        let horsesCsv = document.getElementById('ts-audit-horses-csv');
-        let statsCsv = document.getElementById('ts-audit-stats-csv');
-        let poolsCsv = document.getElementById('ts-audit-pools-csv');
-        let fullText = [
-          'ALL HORSES CSV:',
-          horsesCsv ? horsesCsv.innerText.trim() : '',
-          '',
-          'RACE STATS ROWS:',
-          statsCsv ? statsCsv.innerText.trim() : '',
-          poolsCsv ? poolsCsv.innerText.trim() : ''
-        ].join('\n');
-        copyToClipboard(fullText, e.target);
-      }
-
       if (e.target.id === 'ts-copy-export-btn') {
         let pipeBlock = document.getElementById('ts-export-pipe-string');
         // Copy as TAB-delimited (pipes -> tabs). Excel always splits tabs into columns on paste,
@@ -683,6 +775,9 @@
         let exportText = pipeBlock ? pipeBlock.innerText.trim().replace(/\s*\|\s*/g, '\t') : '';
         copyToClipboard(exportText, e.target);
       }
+
+      if (e.target.id === 'ts-copy-research-horses-btn') copyToClipboard(getResearchHorseRows(calculateModelOutput()), e.target);
+      if (e.target.id === 'ts-copy-research-bets-btn') copyToClipboard(getResearchBetRows(calculateModelOutput()), e.target);
     });
 
     document.addEventListener('mousedown', function(e) {
@@ -756,6 +851,7 @@
   let cachedShowPoolTotal = 0;
   let cachedShowPoolAvailable = false;
   let cachedPoolsWasPercentMode = false; // true when the last Pools payload was auto-detected and converted from % display mode
+  let cachedResultsList = [];     // parsed Results payloads (finish order, WPS + exotic payouts), one per race seen — the page may load results for several races, so keep them all and match on the current race
 
   const ROUTE_IGNORE_LIST = [
     'bet', 'bets', 'betting', 'race', 'races', 'handicapping', 
@@ -1597,7 +1693,10 @@
       let avg = validVals.length > 0 ? validVals.reduce((a, b) => a + b, 0) / validVals.length : 0.0;
       runners.forEach(r => {
         let v = parseFloat(r[col]) || 0;
-        if (v <= 0) r[col] = Math.round(avg * 10) / 10;
+        if (v <= 0) {
+          r[col] = Math.round(avg * 10) / 10;
+          r.IMPUTED_COUNT = (r.IMPUTED_COUNT || 0) + 1; // how many scoring fields were filled in (Research Export)
+        }
       });
     });
 
@@ -1669,6 +1768,10 @@
       let postBonus = calcPostBonus(postCat);
       let styleBonus = calcStyleBonus(r.RUN_STYLE, r.RUN_STYLE_PTS);
       let wetBonus = calcWetStyleBonus(r.RUN_STYLE, r.RUN_STYLE_PTS, wetnessTier);
+
+      // Component values kept on the runner so the Research Export can log what the weights act on.
+      r.C_SPEED = cSpeed; r.C_POWER = cPower; r.C_CLASS = cClass; r.C_DIST = cDist; r.C_DRIVER = cDriver;
+      r.C_TRAINER = cTrainer; r.C_EARLY = cEarly; r.C_FINISH = cFinish; r.C_RECENCY = cRecency; r.C_MARKET = cMarket;
 
       r.POWER_BONUS = powerBonus;
       r.BASE_SKILL = Math.round(baseSkill * 100) / 100;
@@ -1754,6 +1857,7 @@
 
       liveRunners.forEach((r, i) => {
         winProbs[r.PROGRAM] = { modelProb: rawArr[i] / rawSum, zScore: zArr[i] };
+        r.WIN_PROB = rawArr[i] / rawSum; r.Z_SCORE = zArr[i]; // exposed for the Research Export
       });
     }
 
@@ -2193,6 +2297,8 @@
       let byEv = worthwhile.slice().sort((a, b) => b.evPerDollar - a.evPerDollar);
       let best = byEv[0];
       let byHitRate = worthwhile.slice().sort((a, b) => b.hitProb - a.hitProb).find(c => c.type !== best.type) || byEv[1];
+      best.optionLabel = 'A'; // tags the chosen candidates for the Research Export's bet table
+      if (byHitRate) byHitRate.optionLabel = 'B';
 
       scenario = `Value Pick: ${best.type.replace('_', ' ')} (EV/$ = ${best.evPerDollar >= 0 ? '+' : ''}${(best.evPerDollar * 100).toFixed(0)}%)` +
         (byHitRate ? ` | Safety Pick: ${byHitRate.type.replace('_', ' ')} (${(byHitRate.hitProb * 100).toFixed(0)}% modeled hit rate)` : '');
@@ -2225,7 +2331,9 @@
       gaps: { gap12, gap23, gap34, gap45, gap13, gap14 },
       wagerRecs: { scenario, optionRows, extraRows },
       wetnessTier,
-      trackConditionRaw: cachedTrackCondition
+      trackConditionRaw: cachedTrackCondition,
+      weightKey: activeWeightKey,
+      allCandidates: candidates
     };
   }
 
@@ -2268,17 +2376,16 @@
   // picks under Thoroughbred (default) vs Special weights, plus a pipe-delimited export line for
   // each, so results can be logged and compared against actual finishes at any track.
   function getWeightComparisonSectionHtml(modelResDefault, modelResSpecial) {
-    let rawPostTime = getActivePostTime();
-    let { dateStr, timeStr } = parseExportDateTime(rawPostTime);
-    let trackName = getActiveTrackName().replace(/"/g, '');
-    let raceNum = getActiveRaceNum();
+    // Same field order as the main pipe export / results sheet (Model Changes, RACE_ID, Track, then
+    // the weight set in the Breed slot, then the predicted top 3).
+    let ctx = getResearchRaceContext();
 
     function top3Row(modelRes, weightLabel) {
       let top1 = modelRes.leaderboard[0], top2 = modelRes.leaderboard[1], top3 = modelRes.leaderboard[2];
       let p1 = top1 ? `#${top1.PROGRAM}` : 'N/A', s1 = top1 ? top1.FINAL_SCORE.toFixed(2) : 'N/A';
       let p2 = top2 ? `#${top2.PROGRAM}` : 'N/A', s2 = top2 ? top2.FINAL_SCORE.toFixed(2) : 'N/A';
       let p3 = top3 ? `#${top3.PROGRAM}` : 'N/A', s3 = top3 ? top3.FINAL_SCORE.toFixed(2) : 'N/A';
-      let pipeString = `${dateStr}|${timeStr}|${trackName}|${raceNum}|${weightLabel}|${p1}|${s1}|${p2}|${s2}|${p3}|${s3}`;
+      let pipeString = `${MODEL_VERSION}|${ctx.raceId}|${ctx.trackName}|${weightLabel}|${p1}|${s1}|${p2}|${s2}|${p3}|${s3}`;
       return { p1, s1, p2, s2, p3, s3, pipeString };
     }
 
@@ -2309,11 +2416,9 @@
   }
 
   function getTestingExportSectionHtml(modelRes) {
-    let rawPostTime = getActivePostTime();
-    let { dateStr, timeStr } = parseExportDateTime(rawPostTime);
-
-    let trackName = getActiveTrackName().replace(/"/g, '');
-    let raceNum = getActiveRaceNum();
+    // Field order matches the results sheet: Model Changes (version), RACE_ID, Track, Breed, then the
+    // predicted top 3. Date / post time / race # are no longer separate columns — they live in RACE_ID.
+    let ctx = getResearchRaceContext();
     let breed = cachedBreed || "Thoroughbred";
 
     let top1 = modelRes.leaderboard[0];
@@ -2329,7 +2434,7 @@
     let p3 = top3 ? `#${top3.PROGRAM}` : 'N/A';
     let s3 = top3 ? top3.FINAL_SCORE.toFixed(2) : 'N/A';
 
-    let pipeString = `${dateStr}|${timeStr}|${trackName}|${raceNum}|${breed}|${p1}|${s1}|${p2}|${s2}|${p3}|${s3}`;
+    let pipeString = `${MODEL_VERSION}|${ctx.raceId}|${ctx.trackName}|${breed}|${p1}|${s1}|${p2}|${s2}|${p3}|${s3}`;
 
     return `
       <div class="ts-panel">
@@ -2342,7 +2447,304 @@
           ${pipeString}
         </div>
         <div class="ts-muted ts-italic" style="font-size:10px;margin-top:4px;">
-          Format: [Date]|[Post Time]|[Track]|[Race #]|[Breed]|[1st #]|[1st Score]|[2nd #]|[2nd Score]|[3rd #]|[3rd Score]
+          Format: [Model Version]|[Race ID]|[Track]|[Breed]|[1st #]|[1st Score]|[2nd #]|[2nd Score]|[3rd #]|[3rd Score]
+        </div>
+      </div>
+    `;
+  }
+
+  // ===== RESULTS (official race) =====
+  // Shape confirmed from a real Results payload: raceDetails.{raceNumber, dataStatus, finishOrder[],
+  // alsoRans[], wpsMatrix[], exoticPools[]}. WPS payouts are per $2; exotic `value` is per `base`
+  // (EX base 1.0, TR base 0.5, QD base 0.1), and `result` is the winning sequence, e.g. "5/1/2".
+  function findResultsPayload(obj, depth = 0) {
+    if (!obj || typeof obj !== 'object' || depth > 5) return null;
+    if (obj.raceDetails && Array.isArray(obj.raceDetails.finishOrder)) return obj;
+    if (Array.isArray(obj)) {
+      for (let item of obj) {
+        let found = findResultsPayload(item, depth + 1);
+        if (found) return found;
+      }
+    } else {
+      for (let key in obj) {
+        if (typeof obj[key] === 'object' && obj[key] !== null) {
+          let found = findResultsPayload(obj[key], depth + 1);
+          if (found) return found;
+        }
+      }
+    }
+    return null;
+  }
+
+  function parseResultsPayload(payload) {
+    let rd = payload.raceDetails || {};
+    let finish = {};   // program -> finish position
+    (rd.finishOrder || []).concat(rd.alsoRans || []).forEach(f => {
+      let prog = String(f.programNumber);
+      let pos = parseInt(f.finishPosition, 10);
+      if (prog && !isNaN(pos) && finish[prog] === undefined) finish[prog] = pos;
+    });
+    let wps = {};      // program -> { win, place, show } payouts per $2 (null where the horse didn't pay that pool)
+    (rd.wpsMatrix || []).forEach(w => {
+      wps[String(w.programNumber)] = {
+        win: typeof w.winPayout === 'number' ? w.winPayout : null,
+        place: typeof w.placePayout === 'number' ? w.placePayout : null,
+        show: typeof w.showPayout === 'number' ? w.showPayout : null
+      };
+    });
+    let exotics = {};  // poolCode -> { value, base, result: [programs in finishing order] }
+    (rd.exoticPools || []).forEach(x => {
+      exotics[String(x.poolCode)] = {
+        value: parseFloat(x.value), base: parseFloat(x.base) || 1,
+        result: String(x.result || '').split('/').map(s => s.trim()).filter(Boolean)
+      };
+    });
+    // The finishOrder / alsoRans lists are not always filled in (confirmed: a payload had both as empty
+    // arrays while still reporting COMPLETE). The finishing order is also carried by finishOrderString
+    // ("7/4/1/6"), by the exotic pool results (the longest one, e.g. the superfecta, "7/4/1/6"), and by
+    // wpsMatrix, which lists the first three finishers in seq order. Use those, in that order, only when
+    // the lists above yielded nothing.
+    let finishSource = 'finishOrder';
+    if (Object.keys(finish).length === 0) {
+      let order = String(rd.finishOrderString || '').split('/').map(x => x.trim()).filter(Boolean);
+      finishSource = 'finishOrderString';
+      if (order.length === 0) {
+        Object.values(exotics).forEach(x => { if (x.result.length > order.length) order = x.result.slice(); });
+        finishSource = 'longest exotic result';
+      }
+      if (order.length === 0) {
+        order = (rd.wpsMatrix || []).slice().sort((a, b) => (a.seq || 0) - (b.seq || 0)).map(w => String(w.programNumber));
+        finishSource = 'wpsMatrix';
+      }
+      order.forEach((prog, i) => { if (prog && finish[prog] === undefined) finish[prog] = i + 1; });
+    }
+
+    // Shape summary shown in the panel when results load but yield no finishers, so the real payload
+    // layout can be seen without opening DevTools: entry counts plus the field names of the first entry.
+    let fo0 = (rd.finishOrder && rd.finishOrder[0]) || (rd.alsoRans && rd.alsoRans[0]) || {};
+    let diag = `finishOrder:${(rd.finishOrder || []).length} alsoRans:${(rd.alsoRans || []).length} wps:${(rd.wpsMatrix || []).length} exotics:${(rd.exoticPools || []).length} firstEntryFields:[${Object.keys(fo0).join(',')}] finishFrom:${finishSource}`;
+    return {
+      raceNumber: parseInt(rd.raceNumber, 10),
+      track: String((payload.track && (payload.track.displayName || payload.track.brisCode)) || ''),
+      status: String(rd.dataStatus || ''),
+      finish, wps, exotics, diag
+    };
+  }
+
+  // The parsed results for the race currently on screen, only if they are complete (race number must
+  // match; track name is compared loosely since display names vary).
+  function getOfficialResults() {
+    let norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    let curRace = parseInt(getActiveRaceNum(), 10);
+    let curTrack = norm(getActiveTrackName());
+    return cachedResultsList.find(res => {
+      if (res.status.toUpperCase() !== 'COMPLETE' || Object.keys(res.finish).length === 0) return false;
+      if (res.raceNumber !== curRace) return false;
+      let a = norm(res.track);
+      return !(a && curTrack && !(a.includes(curTrack) || curTrack.includes(a)));
+    }) || null;
+  }
+
+  // Plain-text explanation of why loaded results didn't match the race on screen (shown in the
+  // Research Export panel): what was received vs what is on screen.
+  function describeResultsMismatch() {
+    let loaded = cachedResultsList.map(r => `R${r.raceNumber} ${r.track || '?'} [${r.status || 'no status'}, ${Object.keys(r.finish).length} finishers; ${r.diag}]`).join('; ');
+    return `loaded: ${loaded} — on screen: R${parseInt(getActiveRaceNum(), 10)} ${getActiveTrackName()}`;
+  }
+
+  // Did this recommended bet win, and what did it actually return (stake included)? Uses the real
+  // official payouts. Returns { hit, payout } where payout is null if it hit but the needed pool
+  // payout isn't in the results (left blank rather than guessed).
+  function getBetOutcome(c, res) {
+    let progs = (String(c.horses).match(/#[A-Za-z0-9]+/g) || []).map(s => s.slice(1));
+    let pos = p => res.finish[String(p)];
+    let byPos = n => Object.keys(res.finish).filter(p => res.finish[p] === n)[0];
+    let ex = res.exotics.EX, tr = res.exotics.TR;
+    let exUnit = cachedExactaBaseUnit || 1;   // per-combo cost the model used for exacta bets
+    // Winning sequences come from the pools' own result strings when present (so ties/dead heats
+    // follow what the tote paid), otherwise from the finish order.
+    let seq2 = (ex && ex.result.length >= 2) ? ex.result : [byPos(1), byPos(2)];
+    let seq3 = (tr && tr.result.length >= 3) ? tr.result : [byPos(1), byPos(2), byPos(3)];
+    let w = res.wps[progs[0]] || {};
+    let perUnit = pool => (pool && isFinite(pool.value)) ? pool.value / pool.base : null;
+    let hit = false, payout = null;
+
+    switch (c.type) {
+      case 'WIN':   hit = pos(progs[0]) === 1; payout = hit && w.win !== null && w.win !== undefined ? w.win * c.cost / 2 : null; break;
+      case 'PLACE': hit = pos(progs[0]) >= 1 && pos(progs[0]) <= 2; payout = hit && w.place != null ? w.place * c.cost / 2 : null; break;
+      case 'SHOW':  hit = pos(progs[0]) >= 1 && pos(progs[0]) <= 3; payout = hit && w.show != null ? w.show * c.cost / 2 : null; break;
+      case 'EXACTA_STRAIGHT':
+        hit = seq2[0] === progs[0] && seq2[1] === progs[1];
+        payout = hit && perUnit(ex) !== null ? perUnit(ex) * c.cost : null; break;
+      case 'EXACTA_WHEEL':
+        hit = seq2[0] === progs[0] && progs.slice(1).includes(seq2[1]);
+        payout = hit && perUnit(ex) !== null ? perUnit(ex) * exUnit : null; break;
+      case 'EXACTA_BOX2':
+      case 'EXACTA_BOX3':
+        hit = progs.includes(seq2[0]) && progs.includes(seq2[1]);
+        payout = hit && perUnit(ex) !== null ? perUnit(ex) * exUnit : null; break;
+      case 'TRIFECTA_BOX':
+        hit = seq3.every(p => progs.includes(p));
+        payout = hit && perUnit(tr) !== null ? perUnit(tr) * TRIFECTA_MIN_BASE_UNIT : null; break;
+      default: return null;
+    }
+    return { hit, payout: hit ? payout : 0 };
+  }
+
+  // ===== RESEARCH EXPORT (for regression / weight fitting) =====
+  // Two tab-delimited tables, one per workbook tab, built live at click time from the current model
+  // output. Data rows only — the headers live in the workbook.
+  //   Horses: 1 row per active horse. Race-level inputs the model uses are repeated on every row, so
+  //           the tab is self-contained for fitting (no join needed). WINNER and TOP3 (2nd-3rd columns) are
+  //           the only after-the-fact inputs: auto-filled for official races, otherwise typed in by hand.
+  //   Bets:   Option A/B only (NOT RECOMMENDED rows are deliberately not collected), plus the
+  //           race-level values the bet math depends on. HIT / ACTUAL_PAYOUT (2nd-3rd columns) are filled by hand.
+  //           A race with no recommended bet gets one row whose BET_TYPE holds the no-bet reason.
+  function tsvRow(cells) {
+    return cells.map(c => (c === null || c === undefined ? '' : String(c)).replace(/[\t\r\n]+/g, ' ')).join('\t');
+  }
+  function numOrBlank(v, digits) {
+    return (typeof v === 'number' && isFinite(v)) ? v.toFixed(digits) : '';
+  }
+
+  // The wager ticked in the Wager Recommendations table. Matched by bet type + horses (not stake, which
+  // moves with the odds) against the model's full candidate list, so it works for Option A/B and for
+  // NOT RECOMMENDED rows alike.
+  function getWagerKey(typeLabel, horses) {
+    return typeLabel + '|' + horses;
+  }
+  function getUserSelectedCandidate(modelRes) {
+    if (!userSelectedWagerKey) return null;
+    return (modelRes.allCandidates || []).find(c => c.cost > 0 && getWagerKey(c.typeLabel, c.horses) === userSelectedWagerKey) || null;
+  }
+  // "$6 Exacta (Straight) #1/#7" — the workbook rebuilds this exact text from the testing.bets COST,
+  // BET_TYPE and HORSES columns to find the selected bet, so keep the two in step.
+  function formatWagerLabel(c) {
+    return '$' + Number(c.cost.toFixed(2)) + ' ' + c.typeLabel + ' ' + c.horses;
+  }
+  // Selected wager text (bets export + panel). With nothing ticked it stays blank, except on a race
+  // where the model recommended no bet at all, which records that reason.
+  function getUserSelectedWagerText(modelRes) {
+    let sel = getUserSelectedCandidate(modelRes);
+    if (sel) return formatWagerLabel(sel);
+    let opts = (modelRes.wagerRecs && modelRes.wagerRecs.optionRows) || [];
+    return (opts.length > 0 && opts.every(o => o.isPass)) ? opts[0].passReason : '';
+  }
+
+  function getResearchRaceContext() {
+    let rawPostTime = getActivePostTime();
+    let { dateStr, timeStr } = parseExportDateTime(rawPostTime);
+    let dp = dateStr.split('/');
+    let isoDate = `${dp[2]}-${dp[0].padStart(2, '0')}-${dp[1].padStart(2, '0')}`;
+    let trackName = getActiveTrackName().replace(/"/g, '');
+    let raceNum = getActiveRaceNum();
+    let postMs = new Date(rawPostTime).getTime();
+    let minToPost = (rawPostTime && rawPostTime !== 'N/A' && !isNaN(postMs)) ? Math.max(0, (postMs - Date.now()) / 60000).toFixed(1) : ''; // bottoms out at 0 (race already off / official)
+    return { raceId: `${isoDate}_${trackName}_${raceNum}`, dateStr, timeStr, trackName, raceNum, minToPost, snapshotTime: new Date().toTimeString().slice(0, 8) };
+  }
+
+  function getResearchHorseRows(modelRes) {
+    let ctx = getResearchRaceContext();
+    let activeHorses = modelRes.leaderboard.filter(h => !h.IS_SCRATCHED && !cachedScratchedMap[h.PROGRAM]);
+    let weekRaces = cachedStatsObj ? getVal(cachedStatsObj, ['weekCountRaces', 'weekRaces'], '') : '';
+    let meetRaces = cachedStatsObj ? getVal(cachedStatsObj, ['meetCountRaces', 'meetRaces', 'meetCount'], '') : '';
+    // Race-level attributes live on the same object as the meet/week stats (the payload's `race`
+    // object). distance + distanceUnit are exported raw (unit seen so far: F with distance 850 = 8.5
+    // furlongs) rather than converted, since other breeds/units haven't been sampled.
+    let rs = cachedStatsObj;
+    let raceCells = [
+      ctx.raceId, ctx.dateStr, ctx.timeStr, ctx.snapshotTime, ctx.minToPost, ctx.trackName, ctx.raceNum,
+      cachedBreed || 'Thoroughbred', MODEL_VERSION, modelRes.weightKey || '', activeHorses.length,
+      cachedTrackCondition || '', modelRes.wetnessTier !== undefined ? modelRes.wetnessTier : '',
+      rs ? getVal(rs, 'distance', '') : '', rs ? getStr(rs, 'distanceUnit', '') : '', rs ? getStr(rs, 'distanceFormatted', '') : '',
+      rs ? getStr(rs, 'surface', '') : '', rs ? getStr(rs, 'raceType', '') : '', rs ? getStr(rs, 'raceClassification', '') : '',
+      rs ? getVal(rs, 'purse', '') : '', rs ? getVal(rs, 'claimingPrice', '') : '', rs ? getVal(rs, 'speedPar', '') : '',
+      weekRaces, meetRaces
+    ];
+    // The two after-the-fact inputs are race-level, so every horse row of the race carries the same
+    // values: WINNER (program # of the winner) and TOP3 (comma-separated program #s of the first three
+    // finishers, in finishing order). Filled in automatically once the race is official and its results
+    // have loaded; blank otherwise, to be typed in by hand.
+    let res = getOfficialResults();
+    let winnerProg = '', top3Progs = '';
+    if (res) {
+      let finishers = Object.keys(res.finish).sort((a, b) => res.finish[a] - res.finish[b]);
+      winnerProg = finishers[0] || '';
+      top3Progs = finishers.slice(0, 3).join(',');
+    }
+    return activeHorses.map(h => {
+      let liveDec = parseOddsToDecimal(h.LIVE_ODDS);
+      // Column order matches the workbook: RACE_ID, WINNER, TOP3, then the rest.
+      return tsvRow([raceCells[0], winnerProg, top3Progs].concat(raceCells.slice(1), [
+        h.PROGRAM, h.HORSE_NAME.replace(/"/g, ''), h.POST, h.RUN_STYLE, h.RUN_STYLE_PTS,
+        numOrBlank(h.ODDS_NUMERIC, 2), (!isNaN(liveDec) && liveDec > 0) ? 'LIVE' : 'ML',
+        numOrBlank(h.C_SPEED, 3), numOrBlank(h.C_POWER, 3), numOrBlank(h.C_CLASS, 3), numOrBlank(h.C_DIST, 3), numOrBlank(h.C_DRIVER, 4),
+        numOrBlank(h.C_TRAINER, 4), numOrBlank(h.C_EARLY, 3), numOrBlank(h.C_FINISH, 3), numOrBlank(h.C_RECENCY, 1), numOrBlank(h.C_MARKET, 3),
+        numOrBlank(h.POST_BONUS, 2), numOrBlank(h.STYLE_BONUS, 2), numOrBlank(h.WET_BONUS, 2),
+        numOrBlank(h.FINAL_SCORE, 2), h.RANK, numOrBlank(h.Z_SCORE, 3), numOrBlank(h.WIN_PROB, 4), h.IMPUTED_COUNT || 0
+      ]));
+    }).join('\n');
+  }
+
+  function getResearchBetRows(modelRes) {
+    let ctx = getResearchRaceContext();
+    let derived = getDerivedTakeout();
+    // Column order matches the workbook: RACE_ID, HIT, ACTUAL_PAYOUT, then the rest. HIT and
+    // ACTUAL_PAYOUT are filled in automatically once the race is official; blank otherwise.
+    let res = getOfficialResults();
+    let raceCells = [ctx.dateStr, ctx.trackName, ctx.raceNum, cachedBreed || 'Thoroughbred', MODEL_VERSION];
+    let poolCells = [
+      cachedWinPoolTotal || 0, cachedPlacePoolTotal || 0, cachedShowPoolTotal || 0, cachedExactaPoolTotal || 0, cachedTrifectaPoolTotal || 0,
+      getEffectiveTakeout().toFixed(4), derived.rate !== null ? derived.rate.toFixed(4) : ''
+    ];
+    let picked = (modelRes.allCandidates || []).filter(c => c.optionLabel === 'A' || c.optionLabel === 'B')
+      .sort((a, b) => a.optionLabel.localeCompare(b.optionLabel));
+    // A ticked wager that isn't Option A/B (a NOT RECOMMENDED row) still needs a row here, so its
+    // hit/payout can be looked up for the results sheet. It is tagged OPTION = USER.
+    let userPick = getUserSelectedCandidate(modelRes);
+    if (userPick && !picked.includes(userPick)) picked.push(Object.assign({}, userPick, { optionLabel: 'USER', isUserPick: true }));
+    if (picked.length === 0) {
+      let reasonRow = ((modelRes.wagerRecs && modelRes.wagerRecs.optionRows) || []).find(o => o.isPass);
+      // No bet was recommended, so there is nothing to score: HIT and ACTUAL_PAYOUT stay blank.
+      return tsvRow([ctx.raceId, '', ''].concat(raceCells, ['', reasonRow ? reasonRow.passReason : 'No Bet', '', '', '', '', '', ''], poolCells, [getUserSelectedWagerText(modelRes)])); // no bet recommended: the no-bet reason
+    }
+    return picked.map(c => {
+      let outcome = res ? getBetOutcome(c, res) : null;
+      let hitCell = outcome ? (outcome.hit ? 'Y' : 'N') : '';
+      let payCell = (outcome && outcome.payout !== null) ? outcome.payout.toFixed(2) : '';
+      return tsvRow([ctx.raceId, hitCell, payCell].concat(raceCells, [
+        c.optionLabel, c.typeLabel, c.horses, numOrBlank(c.cost, 2), numOrBlank(c.hitProb, 4),
+        numOrBlank(c.evPerDollar, 4), numOrBlank(c.payoutLow, 2), numOrBlank(c.payoutHigh, 2)
+      ], poolCells, [(c === userPick || c.isUserPick) ? formatWagerLabel(c) : '']));  // USER_SELECTED_WAGER: filled only on the ticked bet's own row (an Option A/B pick keeps its A/B row)
+    }).join('\n');
+  }
+
+  function getResearchExportSectionHtml(modelRes) {
+    // Tells you whether finish position / hit / payout will be filled in on copy. Official results
+    // arrive as their own payload (the Results tab), so a race you're catching up on needs that tab opened.
+    let resultsStatus;
+    if (getOfficialResults()) {
+      resultsStatus = `<span style="color:var(--ts-green);font-weight:700;">✅ Official results loaded</span> — winner, top 3, hit and actual payout will be filled in on copy.`;
+    } else if (cachedResultsList.length > 0) {
+      resultsStatus = `<span style="color:var(--ts-yellow);font-weight:700;">⚠️ Results loaded don't match this race, or aren't complete</span> — winner, top 3, hit and payout will be left blank. <span style="font-size:10px;">(${describeResultsMismatch()})</span>`;
+    } else {
+      resultsStatus = `<span style="color:var(--ts-orange);font-weight:700;">Results not loaded</span> — if this race is already official, open its Results tab and they will be filled in on copy; otherwise those columns stay blank.`;
+    }
+    let selectedText = modelRes ? getUserSelectedWagerText(modelRes) : '';
+    let selectedWagerStatus = selectedText
+      ? `<b>User Selected Wager:</b> ${selectedText}`
+      : `<b>User Selected Wager:</b> none — tick a bet in the Wager Recommendations table to include it.`;
+    return `
+      <div class="ts-panel">
+        <div class="ts-panel-title" style="color:var(--ts-cyan);">📊 Research Export (Tab Delimited)</div>
+        <div class="ts-muted" style="font-size:10.5px;margin-bottom:6px;">
+          Paste each into its matching workbook tab (testing.horses / testing.bets). Data rows only, no headers.
+        </div>
+        <div class="ts-muted" style="font-size:10.5px;margin-bottom:8px;">${resultsStatus}</div>
+        <div class="ts-muted" style="font-size:10.5px;margin-bottom:8px;">${selectedWagerStatus}</div>
+        <div style="display:flex;gap:8px;">
+          <button id="ts-copy-research-horses-btn" class="ts-btn" style="flex:1;">📋 Horses</button>
+          <button id="ts-copy-research-bets-btn" class="ts-btn" style="flex:1;">📋 Bets</button>
         </div>
       </div>
     `;
@@ -2468,11 +2870,12 @@
     if (!existing) {
       existing = document.createElement('div');
       existing.id = 'ts-model-overlay';
-      existing.style.cssText = 'position:fixed;top:40px;right:20px;z-index:999999;padding:16px;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.5);width:min(' + currentWidth + 'px, 94vw);min-width:300px;max-height:88vh;overflow-y:auto;border:2px solid #bd93f9;transform-origin:top right;';
+      existing.style.cssText = 'position:fixed;top:40px;right:20px;z-index:999999;padding:16px;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.5);width:min(' + currentWidth + 'px, 94vw);min-width:300px;max-height:' + currentHeight + 'px;overflow-y:auto;border:2px solid var(--ts-purple);transform-origin:top right;';
       document.body.appendChild(existing);
     }
 
     existing.style.display = isOverlayVisible ? 'block' : 'none';
+    existing.classList.toggle('ts-dark', isDarkMode);
 
     let trackDisplay = getActiveTrackName().toUpperCase().replace(/"/g, '');
     let raceDisplay = String(getActiveRaceNum()).replace(/[^0-9]/g, '');
@@ -2482,6 +2885,17 @@
     let condTag = cachedTrackCondition ? ` (${cachedTrackCondition.toUpperCase()})` : '';
 
     let modelRes = calculateModelOutput();
+
+    // Low-data warning: a normal race's top score lands well above 60; a top score below that means whole
+    // scoring components are empty across the field (e.g. a field of first-time starters), so the ranking
+    // is close to random. Requires a nonzero score so it doesn't fire while data is still loading.
+    let topActiveScore = Math.max(0, ...modelRes.leaderboard
+      .filter(h => !h.IS_SCRATCHED && !cachedScratchedMap[h.PROGRAM])
+      .map(h => h.FINAL_SCORE || 0));
+    let lowScoreWarningHtml = (activeStartersCount > 0 && topActiveScore > 0 && topActiveScore < 60) ? `
+        <div style="margin-top:8px;padding:6px 8px;border:1px solid var(--ts-red);border-radius:6px;background:var(--ts-red-bg);color:var(--ts-red);font-size:11px;font-weight:700;line-height:1.35;">
+          WARNING: Highest score is below 60. Check for missing data. Model can account for small amounts of missing data but a race full of first time starters with no past performance data will yield random results. Wagering on this race is not recommended.
+        </div>` : '';
 
     let leaderboardRowsHtml = modelRes.leaderboard.map(h => {
       let nameStr = h.HORSE_NAME.replace(/"/g, '');
@@ -2595,10 +3009,17 @@
           <span id="ts-width-label" style="color:var(--ts-cyan);font-size:10.5px;font-weight:700;min-width:46px;text-align:right;">${currentWidth}px</span>
         </div>
 
-        <div style="display:flex;align-items:center;gap:8px;">
-          <div class="ts-status-pill" style="flex:1;">
-            <span style="color:var(--ts-green);font-weight:700;">${activeStartersCount}</span> Active Starters &nbsp;|&nbsp; <span style="color:var(--ts-red);font-weight:700;">${scratchedHorsesCount}</span> Scratched
+        <div style="display:flex;align-items:center;gap:6px;background:var(--ts-bg-code);padding:4px 8px;border-radius:6px;border:1px solid var(--ts-border-soft);margin-bottom:8px;">
+          <span class="ts-muted" style="font-size:10.5px;font-weight:700;">HEIGHT</span>
+          <input type="range" id="ts-height-slider" min="300" max="2400" step="10" value="${currentHeight}" style="width:100%;cursor:pointer;accent-color:var(--ts-purple);">
+          <span id="ts-height-label" style="color:var(--ts-cyan);font-size:10.5px;font-weight:700;min-width:46px;text-align:right;">${currentHeight}px</span>
+        </div>
+
+        <div style="display:flex;align-items:stretch;gap:8px;">
+          <div class="ts-status-pill" style="flex:1;display:flex;align-items:center;justify-content:center;">
+            <span style="color:var(--ts-green);font-weight:700;">${activeStartersCount}</span>&nbsp;Active Starters &nbsp;|&nbsp; <span style="color:var(--ts-red);font-weight:700;">${scratchedHorsesCount}</span>&nbsp;Scratched
           </div>
+          <div style="display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:6px;">
           ${cachedBreed === 'Thoroughbred' ? `
           <label class="ts-toggle-row" title="Compare Thoroughbred vs Special weights for this race — for researching whether a track might benefit from a stronger live-odds weight">
             <span class="ts-toggle-switch">
@@ -2608,7 +3029,16 @@
             Wt Compare
           </label>
           ` : ''}
+          <label class="ts-toggle-row" title="Switch between Sky Blue (light) and Turf Green (dark)">
+            <span class="ts-toggle-switch">
+              <input type="checkbox" id="ts-theme-toggle" ${isDarkMode ? 'checked' : ''}>
+              <span class="ts-toggle-slider"></span>
+            </span>
+            Dark Mode
+          </label>
+          </div>
         </div>
+        ${lowScoreWarningHtml}
       </div>
 
       ${getLoaderSectionHtml()}
@@ -2634,16 +3064,18 @@
         <div class="ts-table-wrap">
           <table class="ts-table ts-table-scroll">
             <thead><tr>
-              <th>Option</th><th>$</th><th>Type</th><th>#</th><th>Payout</th><th>Hit %</th>
+              <th></th><th>Option</th><th>$</th><th>Type</th><th>#</th><th>Payout</th><th>Hit %</th>
             </tr></thead>
             <tbody>
               ${modelRes.wagerRecs.optionRows.concat(wagerTableExpanded ? (modelRes.wagerRecs.extraRows || []) : []).map(o => o.isPass ? `
                 <tr>
+                  <td></td>
                   <td>${o.label}</td>
                   <td class="ts-num ts-muted">—</td>
                   <td class="ts-muted" colspan="4">${o.passReason}</td>
                 </tr>` : `
                 <tr>
+                  <td><input type="checkbox" class="ts-wager-pick" data-wager-key="${getWagerKey(o.typeLabel, o.horses)}" title="Use as the User Selected Wager" ${getWagerKey(o.typeLabel, o.horses) === userSelectedWagerKey ? 'checked' : ''}></td>
                   <td>${o.isExtra ? '<span style="color:var(--ts-red);font-weight:700;white-space:nowrap;font-size:11px;">NOT RECOMMENDED</span>' : o.label}</td>
                   <td class="ts-num">$${o.stake}</td>
                   <td style="white-space:nowrap;">${o.typeLabel}</td>
@@ -2663,22 +3095,12 @@
 
       ${dualWeightTestMode && cachedBreed === 'Thoroughbred' ? getWeightComparisonSectionHtml(calculateModelOutput('Thoroughbred'), calculateModelOutput('Special')) : ''}
 
+      ${getResearchExportSectionHtml(modelRes)}
+
       ${getTestingExportSectionHtml(modelRes)}
       `}
 
       ${getCommentsSectionHtml(modelRes.leaderboard)}
-
-      <div class="ts-panel" style="border-style:dashed;">
-        <div class="ts-row-flex" style="margin-bottom:4px;">
-          <div class="ts-muted" style="font-weight:700;font-size:11px;">AUDIT SECTION (RAW EXTRACTED CSVs)</div>
-          <button id="ts-copy-audit-btn" class="ts-btn" style="padding:3px 8px;font-size:10px;">📋 Copy All</button>
-        </div>
-        <div class="ts-section-label">All Horses CSV</div>
-        <div id="ts-audit-horses-csv" class="ts-code-block" style="color:var(--ts-green);word-break:break-all;white-space:pre-wrap;margin-bottom:6px;max-height:140px;font-size:10.5px;">${getFormattedHorsesCsv()}</div>
-        <div class="ts-section-label">Race Stats Rows</div>
-        <div id="ts-audit-stats-csv" class="ts-code-block" style="color:var(--ts-cyan);word-break:break-all;white-space:pre-wrap;margin-bottom:6px;font-size:10.5px;">${cachedStatsCsv}</div>
-        <div id="ts-audit-pools-csv" class="ts-code-block" style="color:var(--ts-orange);word-break:break-all;white-space:pre-wrap;font-size:10.5px;">${getRaceWidePoolsCsv()}</div>
-      </div>
     `;
 
     applyWidth(false);
@@ -2709,7 +3131,18 @@
       let urlData = parseTwinSpiresUrl();
       if (urlData) checkRaceChange(urlData.trackName, urlData.raceNum);
 
-      let runners = findRunnersArray(data);
+      // A Results payload also contains arrays of objects with a programNumber (winPools, wpsMatrix,
+      // finishOrder...), which findRunnersArray would mistake for runner rows — so capture it first
+      // and skip runner parsing for it.
+      let resultsPayload = findResultsPayload(data);
+      if (resultsPayload) {
+        let parsedResults = parseResultsPayload(resultsPayload);
+        // keep one entry per race (replace an earlier copy of the same race, e.g. a status refresh)
+        cachedResultsList = cachedResultsList.filter(r => !(r.raceNumber === parsedResults.raceNumber && r.track === parsedResults.track)).concat(parsedResults);
+        updateOverlay();
+      }
+
+      let runners = resultsPayload ? null : findRunnersArray(data);
       if (runners && runners.length > 0) {
         let sample = runners[0];
         let payloadTrack = getActiveTrackName(sample) || getActiveTrackName(data);
@@ -2793,5 +3226,5 @@
   applyLeftAlignmentCSS();
   applyOverlayThemeCSS();
   updateOverlay();
-  console.log("Live Handicapping Model V25 Running - Scratched horses zeroed post-calculation!");
+  console.log("Live Handicapping Model v2.2 Running - Scratched horses zeroed post-calculation!");
 })();
