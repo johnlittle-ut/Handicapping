@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwinSpires Mobile Handicapper
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      1.2
 // @description  Floating Handicapping Overlay for TwinSpires Mobile
 // @match        https://*.twinspires.com/*
 // @run-at       document-end
@@ -11,6 +11,11 @@
 (function launchTwinSpiresMobileModelV2() {
   let currentZoom = 1.0;
   let currentHeight = Math.round(window.innerHeight * 0.85); // panel max height in px (before zoom); matches the original 85vh until changed
+  let currentWidth = Math.min(400, Math.round(window.innerWidth * 0.92)); // panel width in px (before zoom); matches the original min(400px, 92vw) until changed
+  let widthCustomized = false; // until the slider is used the panel keeps the original min(400px, 92vw); afterwards the slider value is exact (no screen cap — zoom out to fit)
+  function widthCss() {
+    return widthCustomized ? `${currentWidth}px` : 'min(400px, 92vw)';
+  }
   let isDarkMode = false; // false = Sky Blue + Navy (light, default), true = Turf Green (dark); toggled in the status row
   // Drag-preview outline colors can't use the overlay's CSS variables (the outline lives outside it), so they follow the theme here.
   function outlineCss() {
@@ -209,17 +214,17 @@
 
       /* Zoom slider — larger track and thumb than the browser default, sized for touch rather
          than mouse precision. The row this sits in gives it full width (see updateOverlay). */
-      #ts-model-overlay #ts-zoom-slider, #ts-model-overlay #ts-height-slider {
+      #ts-model-overlay #ts-zoom-slider, #ts-model-overlay #ts-width-slider, #ts-model-overlay #ts-height-slider {
         -webkit-appearance: none; appearance: none;
         height: 6px; border-radius: 3px; background: var(--ts-border-soft); outline: none;
       }
-      #ts-model-overlay #ts-zoom-slider::-webkit-slider-thumb, #ts-model-overlay #ts-height-slider::-webkit-slider-thumb {
+      #ts-model-overlay #ts-zoom-slider::-webkit-slider-thumb, #ts-model-overlay #ts-width-slider::-webkit-slider-thumb, #ts-model-overlay #ts-height-slider::-webkit-slider-thumb {
         -webkit-appearance: none; appearance: none;
         width: 26px; height: 26px; border-radius: 50%;
         background: var(--ts-purple); border: 2px solid var(--ts-fg);
         cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,0.5);
       }
-      #ts-model-overlay #ts-zoom-slider::-moz-range-thumb, #ts-model-overlay #ts-height-slider::-moz-range-thumb {
+      #ts-model-overlay #ts-zoom-slider::-moz-range-thumb, #ts-model-overlay #ts-width-slider::-moz-range-thumb, #ts-model-overlay #ts-height-slider::-moz-range-thumb {
         width: 26px; height: 26px; border-radius: 50%; border: 2px solid var(--ts-fg);
         background: var(--ts-purple); cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,0.5);
       }
@@ -350,6 +355,45 @@
     outline.style.width = `${previewW}px`;
     outline.style.height = `${previewH}px`;
     outline.style.display = 'block';
+  }
+
+  // Width-slider preview: the panel's left edge stays put (transform-origin is top left), so the
+  // outline grows/shrinks rightward from that edge.
+  function updateWidthPreview(previewWidthPx) {
+    let overlay = document.getElementById('ts-model-overlay');
+    if (!overlay) return;
+
+    let label = document.getElementById('ts-width-label');
+    if (label) label.innerText = `${Math.round(previewWidthPx)}px`;
+
+    let outline = document.getElementById('ts-zoom-outline');
+    if (!outline) {
+      outline = document.createElement('div');
+      outline.id = 'ts-zoom-outline';
+      outline.style.cssText = outlineCss();
+      document.body.appendChild(outline);
+    }
+
+    let rect = overlay.getBoundingClientRect();
+    let previewW = Math.max(280, previewWidthPx) * currentZoom;
+
+    outline.style.top = `${rect.top}px`;
+    outline.style.left = `${rect.left}px`;
+    outline.style.width = `${previewW}px`;
+    outline.style.height = `${rect.height}px`;
+    outline.style.display = 'block';
+  }
+
+  function applyWidth() {
+    let overlay = document.getElementById('ts-model-overlay');
+    if (overlay) {
+      overlay.style.width = widthCss();
+      let label = document.getElementById('ts-width-label');
+      if (label) label.innerText = `${currentWidth}px`;
+      let slider = document.getElementById('ts-width-slider');
+      if (slider && parseFloat(slider.value) !== currentWidth) slider.value = currentWidth;
+    }
+    removeZoomPreview();
   }
 
   // Height-slider preview: the panel's top edge stays put (transform-origin is top left), so the
@@ -603,10 +647,28 @@
         let previewVal = parseFloat(e.target.value) / 100.0;
         updateZoomPreview(previewVal);
       }
+      if (e.target && e.target.id === 'ts-width-slider') {
+        updateWidthPreview(parseFloat(e.target.value));
+      }
       if (e.target && e.target.id === 'ts-height-slider') {
         updateHeightPreview(parseFloat(e.target.value));
       }
     });
+
+    function commitWidth(e) {
+      if (e.target && e.target.id === 'ts-width-slider') {
+        let slider = document.getElementById('ts-width-slider');
+        if (slider) {
+          currentWidth = Math.round(parseFloat(slider.value));
+          widthCustomized = true;
+          applyWidth();
+        }
+      }
+    }
+
+    document.addEventListener('change', commitWidth);
+    document.addEventListener('mouseup', commitWidth);
+    document.addEventListener('touchend', commitWidth);
 
     function commitHeight(e) {
       if (e.target && e.target.id === 'ts-height-slider') {
@@ -2504,7 +2566,7 @@
       let estHeight = Math.min(window.innerHeight * 0.85, 600);
       let centeredLeft = Math.max(10, (window.innerWidth - estWidth) / 2);
       let centeredTop = Math.max(20, (window.innerHeight - estHeight) / 2);
-      existing.style.cssText = `position:fixed;top:${centeredTop}px;left:${centeredLeft}px;z-index:999999;padding:16px;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.5);width:min(400px, 92vw);min-width:280px;max-height:${currentHeight}px;overflow-y:auto;border:2px solid var(--ts-purple);transform-origin:top left;`;
+      existing.style.cssText = `position:fixed;top:${centeredTop}px;left:${centeredLeft}px;z-index:999999;padding:16px;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.5);width:${widthCss()};min-width:280px;max-height:${currentHeight}px;overflow-y:auto;border:2px solid var(--ts-purple);transform-origin:top left;`;
       document.body.appendChild(existing);
     }
 
@@ -2636,6 +2698,12 @@
           <span class="ts-muted" style="font-size:10.5px;font-weight:700;">ZOOM</span>
           <input type="range" id="ts-zoom-slider" min="50" max="200" value="${Math.round(currentZoom * 100)}" style="flex:1;cursor:pointer;accent-color:var(--ts-purple);">
           <span id="ts-zoom-label" style="color:var(--ts-cyan);font-size:10.5px;font-weight:700;min-width:36px;text-align:right;">${Math.round(currentZoom * 100)}%</span>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:8px;background:var(--ts-bg-code);padding:6px 10px;border-radius:6px;border:1px solid var(--ts-border-soft);margin-bottom:8px;">
+          <span class="ts-muted" style="font-size:10.5px;font-weight:700;">WIDTH</span>
+          <input type="range" id="ts-width-slider" min="280" max="1400" step="10" value="${currentWidth}" style="flex:1;cursor:pointer;accent-color:var(--ts-purple);">
+          <span id="ts-width-label" style="color:var(--ts-cyan);font-size:10.5px;font-weight:700;min-width:46px;text-align:right;">${currentWidth}px</span>
         </div>
 
         <div style="display:flex;align-items:center;gap:8px;background:var(--ts-bg-code);padding:6px 10px;border-radius:6px;border:1px solid var(--ts-border-soft);margin-bottom:8px;">
