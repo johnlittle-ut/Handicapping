@@ -375,7 +375,7 @@
     }
 
     let rect = overlay.getBoundingClientRect();
-    let previewW = Math.max(280, previewWidthPx) * currentZoom;
+    let previewW = Math.max(160, previewWidthPx) * currentZoom;
 
     outline.style.top = `${rect.top}px`;
     outline.style.left = `${rect.left}px`;
@@ -2566,7 +2566,7 @@
       let estHeight = Math.min(window.innerHeight * 0.85, 600);
       let centeredLeft = Math.max(10, (window.innerWidth - estWidth) / 2);
       let centeredTop = Math.max(20, (window.innerHeight - estHeight) / 2);
-      existing.style.cssText = `position:fixed;top:${centeredTop}px;left:${centeredLeft}px;z-index:999999;padding:16px;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.5);width:${widthCss()};min-width:280px;max-height:${currentHeight}px;overflow-y:auto;border:2px solid var(--ts-purple);transform-origin:top left;`;
+      existing.style.cssText = `position:fixed;top:${centeredTop}px;left:${centeredLeft}px;z-index:999999;padding:16px;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.5);width:${widthCss()};min-width:160px;max-height:${currentHeight}px;overflow-y:auto;border:2px solid var(--ts-purple);transform-origin:top left;`;
       document.body.appendChild(existing);
     }
 
@@ -2702,7 +2702,7 @@
 
         <div style="display:flex;align-items:center;gap:8px;background:var(--ts-bg-code);padding:6px 10px;border-radius:6px;border:1px solid var(--ts-border-soft);margin-bottom:8px;">
           <span class="ts-muted" style="font-size:10.5px;font-weight:700;">WIDTH</span>
-          <input type="range" id="ts-width-slider" min="280" max="1400" step="10" value="${currentWidth}" style="flex:1;cursor:pointer;accent-color:var(--ts-purple);">
+          <input type="range" id="ts-width-slider" min="160" max="1400" step="10" value="${currentWidth}" style="flex:1;cursor:pointer;accent-color:var(--ts-purple);">
           <span id="ts-width-label" style="color:var(--ts-cyan);font-size:10.5px;font-weight:700;min-width:46px;text-align:right;">${currentWidth}px</span>
         </div>
 
