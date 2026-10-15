@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwinSpires Mobile Handicapper
 // @namespace    http://tampermonkey.net/
-// @version      v2.2
+// @version      1.2
 // @description  Floating Handicapping Overlay for TwinSpires Mobile
 // @match        https://*.twinspires.com/*
 // @run-at       document-end
@@ -59,7 +59,25 @@
   // default; toggled on/off via the switch in the status row. Delete this block, its toggle UI/
   // event listener, and its one usage below to remove the feature entirely once backtesting is done.
   let dualWeightTestMode = false;
-  let wagerTableExpanded = false; // user preference: show all bet types beyond Option A/B (persists across races)
+  // Custom wager (bottom row of the Wager Recommendations table): the user's own amount, bet kind and horses, priced
+  // with the engine's probability and payout helpers. The user clicks horse numbers like a TwinSpires bet slip; the
+  // kind decides the picker: 'single' = one horse, 'straight' = one horse per finishing position, 'box' = one list of
+  // horses (any order), 'wheel' = a list of horses under each position. `amount` is the TOTAL stake, spread evenly
+  // across the combos.
+  const CUSTOM_WAGER_KINDS = [
+    { label: 'Win', mode: 'single', n: 1, slots: ['Horse'] },
+    { label: 'Place', mode: 'single', n: 1, slots: ['Horse'] },
+    { label: 'Show', mode: 'single', n: 1, slots: ['Horse'] },
+    { label: 'Exacta Straight', mode: 'straight', n: 2, slots: ['1st', '2nd'] },
+    { label: 'Exacta Box', mode: 'box', n: 2, slots: ['Box'] },
+    { label: 'Exacta Wheel', mode: 'wheel', n: 2, slots: ['1st', '2nd'] },
+    { label: 'Trifecta Straight', mode: 'straight', n: 3, slots: ['1st', '2nd', '3rd'] },
+    { label: 'Trifecta Box', mode: 'box', n: 3, slots: ['Box'] },
+    { label: 'Trifecta Wheel', mode: 'wheel', n: 3, slots: ['1st', '2nd', '3rd'] }
+  ];
+  let customWager = { amount: '2', kind: 'Win', legs: [[], [], []] };
+  let customWagerLastTouch = 0;      // last time the user touched a custom control; a re-render waits while they are mid-edit
+  let customRenderDeferred = false;
   let loadedTabs = {
     'Summary': false,
     'Advanced': false,
@@ -317,7 +335,7 @@
       loadedTabs['Comments'] = true;
     }
 
-    if (!loadedTabs['Comments'] && (Date.now() - collectionStartTime) >= 20000) {
+    if (!loadedTabs['Comments'] && (Date.now() - collectionStartTime) >= 15000) {
       loadedTabs['Comments'] = true;
     }
 
@@ -573,6 +591,7 @@
     cachedShowPoolTotal = 0;
     cachedShowPoolAvailable = false;
     cachedPoolsWasPercentMode = false;
+    customWager.legs = [[], [], []]; // program numbers belong to the old race; amount and bet kind are kept
     REQUIRED_TABS.forEach(tab => loadedTabs[tab] = false);
     previousRankScoreMap = {};
     lastFieldFingerprint = null;
@@ -643,6 +662,11 @@
 
   if (!window.__tsEventListenerAttached) {
     document.addEventListener('input', function(e) {
+      if (e.target && e.target.id === 'ts-custom-amount') {
+        customWager.amount = e.target.value;
+        customWagerLastTouch = Date.now();
+        refreshCustomWagerCells();
+      }
       if (e.target && e.target.id === 'ts-zoom-slider') {
         let previewVal = parseFloat(e.target.value) / 100.0;
         updateZoomPreview(previewVal);
@@ -709,14 +733,45 @@
         if (staleOutline) staleOutline.remove();
         updateOverlay();
       }
+      if (e.target && e.target.classList && e.target.classList.contains('ts-custom-ctl')) {
+        if (e.target.id === 'ts-custom-amount') {
+          customWager.amount = e.target.value; // result cells already updated live while typing; the panel refreshes when focus leaves
+        } else if (e.target.id === 'ts-custom-type') {
+          customWager.kind = e.target.value;
+          let mode = (CUSTOM_WAGER_KINDS.find(k => k.label === customWager.kind) || {}).mode;
+          if (mode === 'single' || mode === 'straight') customWager.legs = customWager.legs.map(l => l.slice(0, 1)); // one horse per position keeps one pick
+          customWagerLastTouch = 0;
+          updateOverlay(true);
+        }
+      }
+    });
+
+    // Custom wager controls: remember when they were last touched, price live while an amount is typed, and
+    // run the held refresh once focus leaves them.
+    document.addEventListener('focusin', function(e) {
+      if (e.target && e.target.classList && e.target.classList.contains('ts-custom-ctl')) customWagerLastTouch = Date.now();
+    });
+    document.addEventListener('focusout', function(e) {
+      if (e.target && e.target.classList && e.target.classList.contains('ts-custom-ctl')) {
+        setTimeout(function() {
+          let f = document.activeElement;
+          if (customRenderDeferred && !(f && f.classList && f.classList.contains('ts-custom-ctl'))) updateOverlay(true);
+        }, 50);
+      }
     });
 
     document.addEventListener('click', function(e) {
       if (!e.target) return;
 
-      if (e.target.id === 'ts-wager-expand-btn') {
-        wagerTableExpanded = !wagerTableExpanded;
-        updateOverlay();
+      let chip = e.target.closest ? e.target.closest('.ts-custom-chip') : null;
+      if (chip) {
+        let pos = parseInt(chip.getAttribute('data-pos'), 10), prog = chip.getAttribute('data-prog');
+        let mode = (CUSTOM_WAGER_KINDS.find(k => k.label === customWager.kind) || {}).mode;
+        let single = mode === 'single' || mode === 'straight'; // these pick one horse per row; box and wheel allow several
+        let leg = customWager.legs[pos] || [];
+        customWager.legs[pos] = leg.includes(prog) ? leg.filter(p => p !== prog) : (single ? [prog] : leg.concat(prog)); // click again to remove
+        customWagerLastTouch = 0;
+        updateOverlay(true);
         return;
       }
 
@@ -1838,13 +1893,20 @@
       let stdevScore = Math.sqrt(variance) || 1;
 
       const SCORE_PROB_K = 0.70; // controls how sharply score gaps translate into probability separation
+      // Every hit % is built from these win probabilities (Harville), so one blend toward an even split makes all of
+      // them less confident at once: the model can't see most of what decides a race, so a leader's raw share overstates
+      // its real chance. 0 = raw model, 1 = every horse equal. Near-tie clustering below keeps using the RAW share, so
+      // which bets are eligible does not change; only the probabilities, EVs and EV-based picks do.
+      const PROB_SHRINK = 0.15;
 
       let zArr = liveRunners.map(r => Math.max(-MAX_Z_REF, Math.min(MAX_Z_REF, (r.FINAL_SCORE - meanScore) / stdevScore)));
       let rawArr = zArr.map(z => Math.exp(SCORE_PROB_K * z));
       let rawSum = rawArr.reduce((a, b) => a + b, 0) || 1;
 
       liveRunners.forEach((r, i) => {
-        winProbs[r.PROGRAM] = { modelProb: rawArr[i] / rawSum, zScore: zArr[i] };
+        let rawShare = rawArr[i] / rawSum;
+        let shrunk = (1 - PROB_SHRINK) * rawShare + PROB_SHRINK / liveRunners.length;
+        winProbs[r.PROGRAM] = { modelProb: shrunk, rawProb: rawShare, zScore: zArr[i] };
       });
     }
 
@@ -1967,6 +2029,7 @@
     }
 
     let candidates = [];
+    let customWagerResult = null; // the user's custom wager, priced at the end of the engine block below
     let baseU = cachedExactaBaseUnit || 1;
 
     if (liveRunners.length >= 2) {
@@ -1984,8 +2047,8 @@
       const NEAR_TIE_PROB_RATIO = 0.75;
 
       function isNearTie(progA, progB) {
-        let pA = winProbs[progA] ? winProbs[progA].modelProb : 0;
-        let pB = winProbs[progB] ? winProbs[progB].modelProb : 0;
+        let pA = winProbs[progA] ? winProbs[progA].rawProb : 0;
+        let pB = winProbs[progB] ? winProbs[progB].rawProb : 0;
         let hi = Math.max(pA, pB), lo = Math.min(pA, pB);
         if (hi <= 0) return false;
         return (lo / hi) >= NEAR_TIE_PROB_RATIO;
@@ -2252,6 +2315,92 @@
           }
         });
       }
+
+      // --- Custom wager: same helpers and payout models as the candidates above, but the user picks the
+      // bet kind, the horses and the total amount. The combos are every ordered finish (distinct horses) the picks
+      // allow, priced exactly like the engine's own straight / box / wheel candidates so the export reads the same.
+      // Never part of Option A/B or the NOT RECOMMENDED rows. Returns { error } when the picks are incomplete or the
+      // needed pool / Probables data isn't loaded yet. ---
+      function priceCustomWager(spec) {
+        let kindDef = CUSTOM_WAGER_KINDS.find(k => k.label === spec.kind);
+        let amount = parseFloat(spec.amount);
+        if (!kindDef) return { error: 'Choose a bet type.' };
+        if (!(amount > 0)) return { error: 'Enter a wager amount.' };
+        let n = kindDef.n;
+        let live = list => (list || []).map(String).filter(p => winProbs[p]); // drop scratched / unknown horses
+        let legs = [];
+        if (kindDef.mode === 'box') {
+          let box = live((spec.legs || [])[0]);
+          if (box.length < n) return { error: 'Pick at least ' + n + ' horses for the box.' };
+          for (let i = 0; i < n; i++) legs.push(box);
+        } else {
+          for (let i = 0; i < n; i++) legs.push(live((spec.legs || [])[i]));
+          if (kindDef.mode === 'straight') legs = legs.map(l => l.slice(0, 1));
+          if (legs.some(l => l.length === 0)) return { error: n === 1 ? 'Choose a horse.' : 'Choose at least one horse for each position (' + kindDef.slots.join(', ') + ').' };
+        }
+        let noData = { error: 'Pool or Probables data for this bet has not loaded yet.' };
+        let tag = p => '#' + p;
+        let uniq = a => a.filter((x, i) => a.indexOf(x) === i);
+        let c = { cost: amount, isCustom: true, isRealData: true, legs };
+
+        if (n === 1) {
+          let p0 = legs[0][0];
+          if (kindDef.label === 'Win') {
+            let rate = getWinPoolPayout(p0);
+            if (rate === null) return noData;
+            let payout = amount * rate;
+            Object.assign(c, { type: 'WIN', typeLabel: 'Win', horses: tag(p0), hitProb: winProbs[p0].modelProb, payoutLow: payout, payoutHigh: payout, ev: winProbs[p0].modelProb * payout - amount });
+          } else {
+            let isPlace = kindDef.label === 'Place';
+            let range = isPlace ? placeRateRange({ PROGRAM: p0 }) : showRateRange({ PROGRAM: p0 });
+            let pHit = isPlace ? placeProbabilityOf(p0) : showProbabilityOf(p0);
+            if (range === null || !(pHit > 0)) return noData;
+            Object.assign(c, { type: isPlace ? 'PLACE' : 'SHOW', typeLabel: kindDef.label, horses: tag(p0), hitProb: pHit, payoutLow: amount * range.min, payoutHigh: amount * range.max, ev: pHit * amount * range.avg - amount });
+          }
+        } else {
+          let isTri = n === 3;
+          let combos = [];
+          if (n === 2) legs[0].forEach(a => legs[1].forEach(b => { if (a !== b) combos.push([a, b]); }));
+          else legs[0].forEach(a => legs[1].forEach(b => legs[2].forEach(d => { if (a !== b && b !== d && a !== d) combos.push([a, b, d]); })));
+          if (combos.length === 0) return { error: 'Pick at least two different horses.' };
+          let pos = combos[0].map((_, i) => uniq(combos.map(x => x[i])));        // horses actually in play per position
+          let typeLabel, type, horsesText;
+          if (kindDef.mode === 'box') {
+            let k = legs[0].length;
+            typeLabel = (isTri ? 'Trifecta' : 'Exacta') + ' Box (' + k + ')';
+            type = isTri ? 'TRIFECTA_BOX' : (k === 2 ? 'EXACTA_BOX2' : k === 3 ? 'EXACTA_BOX3' : 'EXACTA_BOX');
+            horsesText = legs[0].map(tag).join(', ');
+          } else if (kindDef.mode === 'straight') {
+            typeLabel = isTri ? 'Trifecta (Straight)' : 'Exacta (Straight)';
+            type = isTri ? 'TRIFECTA_CUSTOM' : 'EXACTA_STRAIGHT';
+            horsesText = combos[0].map(tag).join('/');
+          } else if (!isTri && pos[0].length === 1 && !pos[1].includes(pos[0][0])) {
+            // key horse over the rest: named like the engine's own wheel
+            typeLabel = 'Exacta Wheel (' + (pos[1].length + 1) + ')';
+            type = 'EXACTA_WHEEL';
+            horsesText = tag(pos[0][0]) + ' / ' + pos[1].map(tag).join(', ');
+          } else {
+            typeLabel = isTri ? 'Trifecta Wheel' : 'Exacta Wheel (Custom)';
+            type = isTri ? 'TRIFECTA_CUSTOM' : 'EXACTA_CUSTOM';
+            horsesText = pos.map(p => p.map(tag).join(', ')).join(' / ');
+          }
+          let unit = amount / combos.length;
+          let pHit = 0, expected = 0, pays = [];
+          for (let combo of combos) {
+            let pay = isTri ? trifectaPayoutEstimate(combo[0], combo[1], combo[2]) : getExactaPayout(combo[0], combo[1]);
+            if (pay === null || !(pay > 0)) return noData;
+            let p = isTri ? trifectaOrderProb(combo[0], combo[1], combo[2]) : exactaOrderProb(combo[0], combo[1]);
+            pHit += p; expected += p * pay * unit; pays.push(pay);
+          }
+          let low, high;
+          if (isTri) { low = expected * 0.6; high = expected * 1.4; }
+          else { low = Math.min(...pays) * unit * 0.85; high = Math.max(...pays) * unit * 1.15; }
+          Object.assign(c, { type, typeLabel, horses: horsesText, hitProb: pHit, payoutLow: low, payoutHigh: high, ev: expected - amount, unit, combos: combos.length });
+        }
+        c.evPerDollar = c.ev / amount;
+        return c;
+      }
+      customWagerResult = priceCustomWager(customWager);
     }
 
     // Only candidates that pass the clustering rules compete for Option A/B; the rest feed the expanded table.
@@ -2316,7 +2465,8 @@
       gaps: { gap12, gap23, gap34, gap45, gap13, gap14 },
       wagerRecs: { scenario, optionRows, extraRows },
       wetnessTier,
-      trackConditionRaw: cachedTrackCondition
+      trackConditionRaw: cachedTrackCondition,
+      customWager: customWagerResult
     };
   }
 
@@ -2508,7 +2658,7 @@
     }
 
     let elapsedSecs = Math.floor((Date.now() - collectionStartTime) / 1000);
-    let timeRemaining = Math.max(0, 20 - elapsedSecs);
+    let timeRemaining = Math.max(0, 15 - elapsedSecs);
 
     let tabListHtml = REQUIRED_TABS.map(tab => {
       let isLoaded = loadedTabs[tab];
@@ -2551,7 +2701,62 @@
     `;
   }
 
-  function updateOverlay() {
+  // Result cells + note for the custom wager row (also used for the live update while typing an amount).
+  function getCustomWagerResultCells(c) {
+    if (!c) return { payout: '—', hit: '—', note: 'Waiting for field data.' };
+    if (c.error) return { payout: '—', hit: '—', note: '<span style="color:var(--ts-orange);">' + c.error + '</span>' };
+    let fmt = v => '$' + v.toFixed(2);
+    let payout = fmt(c.payoutLow) === fmt(c.payoutHigh) ? fmt(c.payoutLow) : fmt(c.payoutLow) + '–' + fmt(c.payoutHigh);
+    let bits = [c.typeLabel + ' ' + c.horses];
+    if (c.combos > 1) bits.push(c.combos + ' combos, ' + fmt(c.unit) + ' each');
+    bits.push('EV per $1: ' + (c.evPerDollar >= 0 ? '+' : '') + (c.evPerDollar * 100).toFixed(0) + '%');
+    return { payout, hit: (c.hitProb * 100).toFixed(0) + '%', note: bits.join(' · ') };
+  }
+
+  function getCustomWagerRowHtml(modelRes) {
+    let active = modelRes.leaderboard.filter(h => !h.IS_SCRATCHED && !cachedScratchedMap[h.PROGRAM])
+      .slice().sort((a, b) => (parseInt(a.PROGRAM, 10) || 0) - (parseInt(b.PROGRAM, 10) || 0));
+    let kindDef = CUSTOM_WAGER_KINDS.find(k => k.label === customWager.kind) || CUSTOM_WAGER_KINDS[0];
+    let ctl = 'background:var(--ts-bg-code);color:var(--ts-fg);border:1px solid var(--ts-border-soft);border-radius:4px;padding:2px 3px;font-size:11px;font-family:inherit;';
+    let chipBase = 'min-width:24px;padding:2px 4px;margin:0;border-radius:4px;font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;line-height:1.2;';
+    let legsHtml = kindDef.slots.map((slot, i) => {
+      let chosen = ((customWager.legs || [])[i] || []).map(String);
+      let chips = active.map(h => {
+        let on = chosen.includes(String(h.PROGRAM));
+        let name = String(h.HORSE_NAME || '').replace(/"/g, '').replace(/[<>&]/g, '');
+        let look = on ? 'background:var(--ts-purple);color:var(--ts-btn-text);border:1px solid var(--ts-purple);' : 'background:var(--ts-bg-code);color:var(--ts-fg);border:1px solid var(--ts-border-soft);';
+        return '<button type="button" class="ts-custom-chip" data-pos="' + i + '" data-prog="' + h.PROGRAM + '" title="#' + h.PROGRAM + ' ' + name + '" style="' + chipBase + look + '">' + h.PROGRAM + '</button>';
+      }).join('');
+      return '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:3px;margin-bottom:3px;"><span class="ts-muted" style="font-size:10.5px;min-width:26px;">' + slot + '</span>' + chips + '</div>';
+    }).join('');
+    let c = modelRes.customWager;
+    let cells = getCustomWagerResultCells(c);
+    let amountText = String(customWager.amount).replace(/[^0-9.]/g, '');
+    return `
+      <tr>
+        <td>CUSTOM</td>
+        <td><input type="number" id="ts-custom-amount" class="ts-custom-ctl" min="0" step="any" inputmode="decimal" value="${amountText}" title="Total wager amount" style="${ctl}width:56px;"></td>
+        <td><select id="ts-custom-type" class="ts-custom-ctl" title="Bet type" style="${ctl}">
+          ${CUSTOM_WAGER_KINDS.map(k => `<option value="${k.label}" ${k.label === kindDef.label ? 'selected' : ''}>${k.label}</option>`).join('')}
+        </select></td>
+        <td>${legsHtml}</td>
+        <td class="ts-num" id="ts-custom-payout" style="white-space:nowrap;">${cells.payout}</td>
+        <td class="ts-num" id="ts-custom-hit">${cells.hit}</td>
+      </tr>
+      <tr>
+        <td colspan="6" class="ts-muted" id="ts-custom-note" style="font-size:10.5px;">${cells.note}</td>
+      </tr>`;
+  }
+
+  // Updates just the custom row's result cells while the user types an amount, so the panel is not re-rendered
+  // (which would drop focus mid-keystroke).
+  function refreshCustomWagerCells() {
+    let cells = getCustomWagerResultCells(calculateModelOutput().customWager);
+    let set = (id, html) => { let el = document.getElementById(id); if (el) el.innerHTML = html; };
+    set('ts-custom-payout', cells.payout); set('ts-custom-hit', cells.hit); set('ts-custom-note', cells.note);
+  }
+
+  function updateOverlay(force) {
     applyOverlayThemeCSS();
     renderToggleButton();
 
@@ -2572,6 +2777,15 @@
 
     existing.style.display = isOverlayVisible ? 'block' : 'none';
     existing.classList.toggle('ts-dark', isDarkMode);
+
+    // A re-render replaces every element, which would close an open dropdown or drop the cursor from the amount box.
+    // So while a custom-wager control has focus and was touched in the last 10s, hold the refresh; it runs when focus leaves.
+    let focused = document.activeElement;
+    if (force !== true && focused && focused.classList && focused.classList.contains('ts-custom-ctl') && existing.contains(focused) && (Date.now() - customWagerLastTouch) < 10000) {
+      customRenderDeferred = true;
+      return;
+    }
+    customRenderDeferred = false;
 
     let trackDisplay = getActiveTrackName().toUpperCase().replace(/"/g, '');
     let raceDisplay = String(getActiveRaceNum()).replace(/[^0-9]/g, '');
@@ -2761,10 +2975,10 @@
         <div class="ts-table-wrap">
           <table class="ts-table ts-table-scroll">
             <thead><tr>
-              <th>Option</th><th>$</th><th>Type</th><th>#</th><th>Payout</th><th>Hit %</th>
+              <th>Option</th><th>$</th><th>Type</th><th>#</th><th>Est. Payout</th><th>Hit %</th>
             </tr></thead>
             <tbody>
-              ${modelRes.wagerRecs.optionRows.concat(wagerTableExpanded ? (modelRes.wagerRecs.extraRows || []) : []).map(o => o.isPass ? `
+              ${modelRes.wagerRecs.optionRows.concat(modelRes.wagerRecs.extraRows || []).map(o => o.isPass ? `
                 <tr>
                   <td>${o.label}</td>
                   <td class="ts-num ts-muted">—</td>
@@ -2779,13 +2993,10 @@
                   <td class="ts-num">${(o.hitProb * 100).toFixed(0)}%</td>
                 </tr>`
               ).join('')}
+              ${getCustomWagerRowHtml(modelRes)}
             </tbody>
           </table>
         </div>
-        ${(modelRes.wagerRecs.extraRows || []).length > 0 ? `
-        <div style="text-align:right;margin-top:0;line-height:1;">
-          <button id="ts-wager-expand-btn" title="${wagerTableExpanded ? 'Show only Option A/B' : 'Show all other bet types'}" style="background:none;border:none;padding:0 4px;margin:0;cursor:pointer;font-size:18px;line-height:1;font-weight:700;font-family:inherit;color:var(--ts-purple);">${wagerTableExpanded ? '−' : '+'}</button>
-        </div>` : ''}
       </div>
 
       ${dualWeightTestMode && cachedBreed === 'Thoroughbred' ? getWeightComparisonSectionHtml(calculateModelOutput('Thoroughbred'), calculateModelOutput('Special')) : ''}
