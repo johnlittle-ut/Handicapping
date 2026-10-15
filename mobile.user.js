@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwinSpires Mobile Handicapper
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      v2.2
 // @description  Floating Handicapping Overlay for TwinSpires Mobile
 // @match        https://*.twinspires.com/*
 // @run-at       document-end
@@ -11,15 +11,15 @@
 (function launchTwinSpiresMobileModelV2() {
   let currentZoom = 1.0;
   let currentHeight = Math.round(window.innerHeight * 0.85); // panel max height in px (before zoom); matches the original 85vh until changed
-  let currentWidth = Math.min(400, Math.round(window.innerWidth * 0.92)); // panel width in px (before zoom); matches the original min(400px, 92vw) until changed
+  let currentWidth = Math.max(280, Math.min(400, Math.round(window.innerWidth * 0.92))); // panel width in px (before zoom); matches the original min(400px, 92vw) until changed
   let widthCustomized = false; // until the slider is used the panel keeps the original min(400px, 92vw); afterwards the slider value is exact (no screen cap — zoom out to fit)
   function widthCss() {
     return widthCustomized ? `${currentWidth}px` : 'min(400px, 92vw)';
   }
-  let isDarkMode = false; // false = Sky Blue + Navy (light, default), true = Turf Green (dark); toggled in the status row
+  let isDarkMode = false; // false = Sky Blue + Navy (light, default), true = Midnight Navy (dark); toggled in the status row
   // Drag-preview outline colors can't use the overlay's CSS variables (the outline lives outside it), so they follow the theme here.
   function outlineCss() {
-    let rgb = isDarkMode ? '217,180,74' : '29,78,137';
+    let rgb = isDarkMode ? '109,180,242' : '29,78,137';
     return `position:fixed;z-index:1000000;border:2px dashed rgb(${rgb});background:rgba(${rgb},0.15);pointer-events:none;border-radius:8px;box-shadow:0 0 15px rgba(${rgb},0.4);transition:none;`;
   }
   let isDragging = false;
@@ -111,26 +111,26 @@
       }
       #ts-model-overlay * { box-sizing: border-box; }
 
-      /* Dark mode (Turf Green) — overrides the light Sky Blue variables above */
+      /* Dark mode (Midnight Navy) — overrides the light Sky Blue variables above */
       #ts-model-overlay.ts-dark {
-        --ts-bg: #17331f;
-        --ts-bg-panel: #112a19;
-        --ts-bg-code: #0c2013;
-        --ts-border: #2f5a3d;
-        --ts-border-soft: #25472f;
-        --ts-border-accent: #3f7a52;
-        --ts-fg: #f3f1e6;
-        --ts-fg-muted: #9db8a4;
-        --ts-purple: #d9b44a;
-        --ts-cyan: #bfe3c8;
-        --ts-green: #6be28d;
-        --ts-red: #ff7a6b;
-        --ts-yellow: #f0e08a;
-        --ts-orange: #e8a65c;
-        --ts-pink: #e9c9a0;
-        --ts-btn-text: #1a2a10;
-        --ts-stripe: rgba(243,241,230,0.04);
-        --ts-red-bg: rgba(255,122,107,0.12);
+        --ts-bg: #0e1a2b;
+        --ts-bg-panel: #142338;
+        --ts-bg-code: #0a1422;
+        --ts-border: #2a4263;
+        --ts-border-soft: #213652;
+        --ts-border-accent: #4a86c8;
+        --ts-fg: #e8eff8;
+        --ts-fg-muted: #8da4be;
+        --ts-purple: #6db4f2;
+        --ts-cyan: #9ccfff;
+        --ts-green: #4fd38a;
+        --ts-red: #ff7f70;
+        --ts-yellow: #e6c75e;
+        --ts-orange: #f2a65e;
+        --ts-pink: #b8a8ea;
+        --ts-btn-text: #08172a;
+        --ts-stripe: rgba(232,239,248,0.04);
+        --ts-red-bg: rgba(255,127,112,0.12);
       }
 
       #ts-model-overlay .ts-panel {
@@ -479,12 +479,12 @@
         min-height: 60px !important;
         max-height: 60px !important;
         border-radius: 50% !important;
-        border: 3px solid ${isDarkMode ? '#3f7a52' : '#2c5d91'} !important;
+        border: 3px solid ${isDarkMode ? '#4a86c8' : '#2c5d91'} !important;
         padding: 0 !important;
         margin: 0 !important;
         overflow: hidden !important;
         cursor: pointer !important;
-        background-color: ${isDarkMode ? '#0c2013' : '#dce6f0'} !important;
+        background-color: ${isDarkMode ? '#0a1422' : '#dce6f0'} !important;
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
@@ -518,7 +518,7 @@
       }
 
       button#ts-toggle-btn.ts-toggle-btn.active {
-        border-color: ${isDarkMode ? '#d9b44a' : '#1d4e89'} !important;
+        border-color: ${isDarkMode ? '#6db4f2' : '#1d4e89'} !important;
         opacity: 1.0 !important;
       }
     `;
@@ -2566,7 +2566,7 @@
       let estHeight = Math.min(window.innerHeight * 0.85, 600);
       let centeredLeft = Math.max(10, (window.innerWidth - estWidth) / 2);
       let centeredTop = Math.max(20, (window.innerHeight - estHeight) / 2);
-      existing.style.cssText = `position:fixed;top:${centeredTop}px;left:${centeredLeft}px;z-index:999999;padding:16px;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.5);width:${widthCss()};min-width:160px;max-height:${currentHeight}px;overflow-y:auto;border:2px solid var(--ts-purple);transform-origin:top left;`;
+      existing.style.cssText = `position:fixed;top:${centeredTop}px;left:${centeredLeft}px;z-index:999999;padding:16px;border-radius:10px;box-shadow:0 10px 25px rgba(0,0,0,0.5);width:${widthCss()};min-width:${widthCustomized ? 160 : 280}px;max-height:${currentHeight}px;overflow-y:auto;border:2px solid var(--ts-purple);transform-origin:top left;`;
       document.body.appendChild(existing);
     }
 
@@ -2726,7 +2726,7 @@
             Wt Compare
           </label>
           ` : ''}
-          <label class="ts-toggle-row" title="Switch between Sky Blue (light) and Turf Green (dark)">
+          <label class="ts-toggle-row" title="Switch between Sky Blue (light) and Midnight Navy (dark)">
             <span class="ts-toggle-switch">
               <input type="checkbox" id="ts-theme-toggle" ${isDarkMode ? 'checked' : ''}>
               <span class="ts-toggle-slider"></span>
@@ -2797,6 +2797,14 @@
     applyZoom();
   }
 
+  // True when a runner/stats payload names a race number that differs from the race in the URL, so another
+  // race's horses (same program numbers) can't merge into this race's data. Only fires when BOTH are known.
+  function isOtherRacePayload(urlData, payloadRace) {
+    if (!urlData || !payloadRace) return false;
+    let p = String(payloadRace).replace(/[^0-9]/g, '');
+    return p !== '' && parseInt(p, 10) !== urlData.raceNum;
+  }
+
   function processResponse(url, text, seq) {
     if (seq !== undefined) {
       let pattern = getUrlPattern(url);
@@ -2822,7 +2830,7 @@
       if (urlData) checkRaceChange(urlData.trackName, urlData.raceNum);
 
       let runners = findRunnersArray(data);
-      if (runners && runners.length > 0) {
+      if (runners && runners.length > 0 && !isOtherRacePayload(urlData, runners[0].raceNumber || data.raceNumber)) {
         let sample = runners[0];
         let payloadTrack = getActiveTrackName(sample) || getActiveTrackName(data);
         let payloadRace = sample.raceNumber || data.raceNumber;
@@ -2836,7 +2844,7 @@
       }
 
       let statsObj = findStatsObject(data);
-      if (statsObj) {
+      if (statsObj && !isOtherRacePayload(urlData, statsObj.raceNumber || data.raceNumber)) {
         cachedStatsObj = statsObj;
         let payloadTrack = getActiveTrackName(statsObj) || getActiveTrackName(data);
         let payloadRace = statsObj.raceNumber || data.raceNumber;
