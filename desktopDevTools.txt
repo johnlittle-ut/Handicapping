@@ -2689,8 +2689,13 @@
     let norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     let curRace = parseInt(getActiveRaceNum(), 10);
     let curTrack = norm(getActiveTrackName());
+    // A payload can sit at PENDING (confirmed: the Results tab showed no Finish Order and the payload reported PENDING
+    // while the race itself was OFFICIAL and the payouts were posted). Treat PENDING as usable only when a win payout is
+    // actually present, which only exists once the race has been run and the tote has paid.
+    let hasWinPayout = res => Object.values(res.wps).some(w => typeof w.win === 'number');
     return cachedResultsList.find(res => {
-      if (res.status.toUpperCase() !== 'COMPLETE' || Object.keys(res.finish).length === 0) return false;
+      let status = res.status.toUpperCase();
+      if (!(status === 'COMPLETE' || (status === 'PENDING' && hasWinPayout(res))) || Object.keys(res.finish).length === 0) return false;
       if (res.raceNumber !== curRace) return false;
       let a = norm(res.track);
       return !(a && curTrack && !(a.includes(curTrack) || curTrack.includes(a)));
