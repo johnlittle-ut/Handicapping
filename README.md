@@ -16,19 +16,7 @@
   will be.
 #
 #
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
+
 
 
 This is a handicapping model built as an extension to the TwinSpires web page. There is one for use on Windows desktop (I used Microsoft Edge dev tools) and one for iPhone Safari. 
