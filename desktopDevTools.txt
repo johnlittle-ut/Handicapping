@@ -1,3 +1,4 @@
+// TwinSpires Handicapping Model - desktop - Version v2.4 (keep in step with MODEL_VERSION below)
 (function launchTwinSpiresVariableInspectorV25() {
   let currentZoom = 1.0;
   let currentWidth = 860; // desktop panel width in px (before zoom); capped at 94vw when applied
