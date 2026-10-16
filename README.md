@@ -1,6 +1,6 @@
 ## DISCLAIMER
 - **Educational project.** This is a hobby and school project. It is not a commercial product, it is
-  not a service, and it is not affiliated with, endorsed by, or sponsored by TwinSpires, Churchill Downs,
+  not a service, and it IS NOT AFFILIATED WITH, endorsed by, or sponsored by TwinSpires, Churchill Downs,
   or any related company. All trademarks belong to their owners.
 - **It does not store or redistribute TwinSpires data.** The script only reads the race information
   that the user's own browser has already loaded on the page they are viewing, and uses it in memory to
@@ -8,7 +8,9 @@
   storage, and nothing is uploaded or shared. This repository contains no TwinSpires data.
 - **It does not run on its own.** It is not a bot, scraper, or crawler. It does nothing unless a person
   opens TwinSpires in their own browser, logs in themselves, and loads a race. It makes no requests of
-  its own, does not click or navigate for the user, and does not place bets.
+  its own, does not click or navigate for the user, and does not place bets. Any calculations that the model
+  completes are based on what the user's current screen displays. These calculations are purposefully limited
+  so that there will be NO attempts to automate this script and/or do anything that may violate the Terms & Conditions of TwinSpires.
 - **Not betting advice.** The numbers are experimental estimates from an unfinished model. Wagering
   involves risk of loss. Use at your own risk.
 - **Use responsibly.** Anyone using this is responsible for following TwinSpires' Terms of Use and the
@@ -41,6 +43,9 @@ Instructions for iPhone (mobile):
 
 There is a pdf document called "How_The_Model_Works" that walks through what calculations, etc. this extension does in real time. It's much easier to read and understand than the code itself.
 There is also an in-progress statistical analysis report called "statistical_analysis_horses.pdf" that will be updated once I have more data to work with. There will be a similar file to test the wagering structure eventually. 
+
+Other notes:
+-Only for use with domestic (US) races. International races do not display all information required by the model.
 
 Happy gambling, 
 John
