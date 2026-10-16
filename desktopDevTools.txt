@@ -35,7 +35,7 @@
 
   // Model version label — stamped on every Research Export race row so logged races can be grouped
   // by the model version that produced them. Matches the version column in the Testing workbook.
-  const MODEL_VERSION = 'v2.3';
+  const MODEL_VERSION = 'v2.4';
 
   // ===== TEMPORARY BACKTESTING FEATURE =====
   // Runs the model twice per race (Thoroughbred/default weights AND Special weights, regardless
@@ -54,6 +54,7 @@
   // kind decides the picker: 'single' = one horse, 'straight' = one horse per finishing position, 'box' = one list of
   // horses (any order), 'wheel' = a list of horses under each position. `amount` is the TOTAL stake, spread evenly
   // across the combos. Ticking its checkbox stores CUSTOM_WAGER_KEY in userSelectedWagerKey.
+  const OPTION_DISPLAY = { A: 'Value Pick', B: 'Safety Pick' }; // table text for Option A / B; the A/B labels stay internal (exports, No Bet keys)
   const CUSTOM_WAGER_KEY = '__custom__';
   const NO_BET_KEY_PREFIX = 'nobet|';   // a ticked No Bet row stores 'nobet|A' or 'nobet|B' in userSelectedWagerKey
   const CUSTOM_WAGER_KINDS = [
@@ -329,6 +330,12 @@
     return fieldStableSince !== null && (Date.now() - fieldStableSince) >= FIELD_STABILITY_WINDOW_MS;
   }
 
+  // TwinSpires has no Summary tab for harness races, so it is neither waited on nor listed when the breed is Harness.
+  function getRequiredTabs() {
+    let isHarness = String(cachedBreed || '').toLowerCase() === 'harness';
+    return isHarness ? REQUIRED_TABS.filter(tab => tab !== 'Summary') : REQUIRED_TABS;
+  }
+
   function getLoadingProgress() {
     let hasComments = Object.values(cachedHorsesMap).some(h => 
       (h.COMMENTS_POS && h.COMMENTS_POS !== '""') || 
@@ -342,12 +349,13 @@
       loadedTabs['Comments'] = true;
     }
 
+    let tabs = getRequiredTabs();
     let completed = 0;
-    REQUIRED_TABS.forEach(tab => {
+    tabs.forEach(tab => {
       if (loadedTabs[tab]) completed++;
     });
-    let percent = Math.round((completed / REQUIRED_TABS.length) * 100);
-    return { completed, total: REQUIRED_TABS.length, percent };
+    let percent = Math.round((completed / tabs.length) * 100);
+    return { completed, total: tabs.length, percent };
   }
 
   function updateZoomPreview(previewZoom) {
@@ -802,6 +810,11 @@
         }
       });
 
+      if (e.target.id === 'ts-help-btn' || (e.target.closest && e.target.closest('#ts-help-btn'))) {
+        openHowItWorks();
+        return;
+      }
+
       if (e.target.id === 'ts-refresh-btn') {
         let urlData = parseTwinSpiresUrl();
         if (urlData) {
@@ -1219,12 +1232,26 @@
     return { grid, poolTotal, baseUnit, poolType, trifectaPoolTotal, trifectaBaseUnit };
   }
 
+  // A displayed pari-mutuel payout is pool x (1 - takeout) / money on that combo, and it does not include a bet you
+  // have not placed yet. Placing it adds your stake to the combo (addedToCombo) and to the whole pool (addedToPool),
+  // which lowers the payout. The money already on the combo is backed out of the displayed payout, then your stake is
+  // added to both. Returns the payout unchanged when there is nothing to add or the pool total is unknown. The effect
+  // is negligible for a small bet in a big pool and grows as the bet becomes a larger share of the pool.
+  function adjustPayoutForOwnStake(payoutPerDollar, poolTotal, takeout, addedToCombo, addedToPool) {
+    if (!(payoutPerDollar > 0) || !(poolTotal > 0) || !(addedToCombo > 0) || !(addedToPool > 0)) return payoutPerDollar;
+    let comboMoney = poolTotal * (1 - takeout) / payoutPerDollar;
+    return (poolTotal + addedToPool) * (1 - takeout) / (comboMoney + addedToCombo);
+  }
+
   // Real per-$1 exacta payout for "from" finishing 1st and "to" finishing 2nd, or null if unavailable.
-  function getExactaPayout(from, to) {
+  // unitStake / ticketTotal (optional): the bettor's own money on this combo / on the whole ticket. When given, the
+  // payout is re-priced as if that money were already in the pool (see adjustPayoutForOwnStake).
+  function getExactaPayout(from, to, unitStake, ticketTotal) {
     let f = String(from), t = String(to);
     if (cachedExactaGrid[f] && cachedExactaGrid[f][t] !== undefined && cachedExactaGrid[f][t] !== null) {
       // grid values are per cachedExactaBaseUnit stake; normalize to a true per-$1 rate
-      return cachedExactaGrid[f][t] / (cachedExactaBaseUnit || 1);
+      let perDollar = cachedExactaGrid[f][t] / (cachedExactaBaseUnit || 1);
+      return adjustPayoutForOwnStake(perDollar, cachedExactaPoolTotal, getEffectiveTakeout(), unitStake, ticketTotal);
     }
     return null;
   }
@@ -1312,11 +1339,12 @@
 
   // Real total return per $1 WIN bet (includes stake), via the standard pari-mutuel formula:
   // (Pool Total x (1 - takeout)) / $ wagered on this horse. Returns null if pool data unavailable.
-  function getWinPoolPayout(program) {
+  function getWinPoolPayout(program, stake) {
     let entry = cachedPoolsMap[String(program)];
     if (!entry || entry.win === null || entry.win <= 0 || !cachedWinPoolTotal) return null;
-    let netPool = cachedWinPoolTotal * (1 - getEffectiveTakeout());
-    return netPool / entry.win;
+    let s = stake > 0 ? stake : 0; // the bettor's own stake joins this horse's money and the pool
+    let netPool = (cachedWinPoolTotal + s) * (1 - getEffectiveTakeout());
+    return netPool / (entry.win + s);
   }
 
   // Real total return per $1 PLACE bet — the CORRECT pari-mutuel mechanism, not the WIN formula.
@@ -1331,7 +1359,7 @@
   // Since we can't know in advance who ELSE will place, `assumedCoPlacerPrograms` should be the
   // model's own top-ranked contenders (excluding `program` itself) as the best available guess —
   // this is inherently an estimate, clearly labeled as such in the candidate's detail text.
-  function getPlacePoolPayout(program, assumedCoPlacerPrograms) {
+  function getPlacePoolPayout(program, assumedCoPlacerPrograms, stake) {
     if (!cachedPlacePoolTotal) return null;
     let allPlacers = [String(program)].concat((assumedCoPlacerPrograms || []).map(String));
     let stakes = allPlacers.map(p => {
@@ -1339,9 +1367,10 @@
       return (entry && entry.place !== null && entry.place > 0) ? entry.place : null;
     });
     if (stakes.some(s => s === null)) return null;
-    let targetStake = stakes[0];
-    let combinedStakes = stakes.reduce((a, b) => a + b, 0);
-    let netPool = cachedPlacePoolTotal * (1 - getEffectiveTakeout());
+    let s = stake > 0 ? stake : 0; // the bettor's own stake joins this horse's money and the pool
+    let targetStake = stakes[0] + s;
+    let combinedStakes = stakes.reduce((a, b) => a + b, 0) + s;
+    let netPool = (cachedPlacePoolTotal + s) * (1 - getEffectiveTakeout());
     let profitPool = netPool - combinedStakes;
     if (profitPool <= 0) return null;
     let profitPerPlacer = profitPool / allPlacers.length;
@@ -1350,7 +1379,7 @@
 
   // Real total return per $1 SHOW bet — same corrected mechanism as PLACE above, split among 3
   // assumed co-placers instead of 2.
-  function getShowPoolPayout(program, assumedCoPlacerPrograms) {
+  function getShowPoolPayout(program, assumedCoPlacerPrograms, stake) {
     if (!cachedShowPoolTotal) return null;
     let allPlacers = [String(program)].concat((assumedCoPlacerPrograms || []).map(String));
     let stakes = allPlacers.map(p => {
@@ -1358,9 +1387,10 @@
       return (entry && entry.show !== null && entry.show > 0) ? entry.show : null;
     });
     if (stakes.some(s => s === null)) return null;
-    let targetStake = stakes[0];
-    let combinedStakes = stakes.reduce((a, b) => a + b, 0);
-    let netPool = cachedShowPoolTotal * (1 - getEffectiveTakeout());
+    let s = stake > 0 ? stake : 0; // the bettor's own stake joins this horse's money and the pool
+    let targetStake = stakes[0] + s;
+    let combinedStakes = stakes.reduce((a, b) => a + b, 0) + s;
+    let netPool = (cachedShowPoolTotal + s) * (1 - getEffectiveTakeout());
     let profitPool = netPool - combinedStakes;
     if (profitPool <= 0) return null;
     let profitPerPlacer = profitPool / allPlacers.length;
@@ -1587,11 +1617,13 @@
     let cleanTrack = getActiveTrackName();
     let cleanBreed = cachedBreed || "Thoroughbred";
 
+    // No W_Distance: the distance component was ~0.97 correlated with Speed (it is the same distance/surface speed figure
+    // Speed already blends in), so it was dropped and its old weight was added to W_Speed (Entry 86). Provisional until the regression.
     const weightsDict = {
-      'Thoroughbred': { W_Speed: 0.17, W_Power: 0.09, W_Class: 0.16, W_Distance: 0.11, W_Driver: 0.06, W_Trainer: 0.08, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Market: 0.03 },
-      'Harness': { W_Speed: 0.16, W_Power: 0.07, W_Class: 0.13, W_Distance: 0.04, W_Driver: 0.18, W_Trainer: 0.06, W_Early: 0.18, W_Finish: 0.08, W_Recency: 0.04, W_Market: 0.03 },
-      'Quarter Horse': { W_Speed: 0.26, W_Power: 0.10, W_Class: 0.09, W_Distance: 0.02, W_Driver: 0.07, W_Trainer: 0.07, W_Early: 0.34, W_Finish: 0.00, W_Recency: 0.02, W_Market: 0.03 },
-      'Special': { W_Speed: 0.17, W_Power: 0.08, W_Class: 0.15, W_Distance: 0.08, W_Driver: 0.06, W_Trainer: 0.09, W_Early: 0.14, W_Finish: 0.11, W_Recency: 0.03, W_Market: 0.09 }
+      'Thoroughbred': { W_Speed: 0.28, W_Power: 0.09, W_Class: 0.16, W_Driver: 0.04, W_Trainer: 0.07, W_Early: 0.15, W_Finish: 0.10, W_Recency: 0.03, W_Market: 0.03 },
+      'Harness': { W_Speed: 0.20, W_Power: 0.07, W_Class: 0.13, W_Driver: 0.16, W_Trainer: 0.05, W_Early: 0.18, W_Finish: 0.08, W_Recency: 0.04, W_Market: 0.03 },
+      'Quarter Horse': { W_Speed: 0.28, W_Power: 0.10, W_Class: 0.09, W_Driver: 0.05, W_Trainer: 0.06, W_Early: 0.34, W_Finish: 0.00, W_Recency: 0.02, W_Market: 0.03 },
+      'Special': { W_Speed: 0.25, W_Power: 0.08, W_Class: 0.15, W_Driver: 0.04, W_Trainer: 0.08, W_Early: 0.14, W_Finish: 0.11, W_Recency: 0.03, W_Market: 0.09 }
     };
 
     // Tracks using the back-tested "Special" weight set instead of default Thoroughbred weights.
@@ -1788,11 +1820,14 @@
       let lastCls = parseFloat(r.LAST_CLS) || 0;
       let cClass = avgCls > 0 ? avgCls : (lastCls > 0 ? lastCls : 0);
 
-      let bestSpd = parseFloat(r.BEST_SPD) || parseFloat(r.BACK_SPD) || 0;
-      let cDist = avgDist > 0 ? avgDist : (bestSpd > 0 ? bestSpd : 0);
 
-      let cDriver = parseFloat(r.W_JKY) || 0;
-      let cTrainer = parseFloat(r.W_TRN) || 0;
+      // Win rates arrive as fractions (0.14), but every other component is on a ~25-160 scale, so they are converted to
+      // percentage points (14) here; otherwise the driver/trainer weights would have almost no effect on the score.
+      // A value already above 1 is taken to be in percent and left alone.
+      let jkyRaw = parseFloat(r.W_JKY) || 0;
+      let trnRaw = parseFloat(r.W_TRN) || 0;
+      let cDriver = jkyRaw > 1 ? jkyRaw : jkyRaw * 100;
+      let cTrainer = trnRaw > 1 ? trnRaw : trnRaw * 100;
 
       let e1 = parseFloat(r.E1) || 0;
       let e2 = parseFloat(r.E2) || 0;
@@ -1813,7 +1848,6 @@
         (cSpeed * activeWeights.W_Speed) +
         (cPower * activeWeights.W_Power) +
         (cClass * activeWeights.W_Class) +
-        (cDist * activeWeights.W_Distance) +
         (cDriver * activeWeights.W_Driver) +
         (cTrainer * activeWeights.W_Trainer) +
         (cEarly * activeWeights.W_Early) +
@@ -1827,7 +1861,7 @@
       let wetBonus = calcWetStyleBonus(r.RUN_STYLE, r.RUN_STYLE_PTS, wetnessTier);
 
       // Component values kept on the runner so the Research Export can log what the weights act on.
-      r.C_SPEED = cSpeed; r.C_POWER = cPower; r.C_CLASS = cClass; r.C_DIST = cDist; r.C_DRIVER = cDriver;
+      r.C_SPEED = cSpeed; r.C_POWER = cPower; r.C_CLASS = cClass; r.C_DRIVER = cDriver;
       r.C_TRAINER = cTrainer; r.C_EARLY = cEarly; r.C_FINISH = cFinish; r.C_RECENCY = cRecency; r.C_MARKET = cMarket;
 
       r.POWER_BONUS = powerBonus;
@@ -1982,8 +2016,8 @@
     // horses' odds together) was a reasonable rough approximation for one combo, but broke down
     // badly once summed across all 6 combos of a 3-horse box simultaneously — waiting for real data
     // is more honest than bounding a formula that shouldn't be trusted at all.
-    function exactaPayoutEstimate(progA, progB) {
-      let real = getExactaPayout(progA, progB);
+    function exactaPayoutEstimate(progA, progB, unitStake, ticketTotal) {
+      let real = getExactaPayout(progA, progB, unitStake, ticketTotal);
       return real !== null ? { value: real, isReal: true } : null;
     }
 
@@ -2015,7 +2049,7 @@
     // with how big or small THIS race's trifecta pool actually is, rather than one flat number
     // applied to every race regardless of size.
     const TRIFECTA_PAYOUT_ABSOLUTE_BACKSTOP = 1000; // per $1 base; a hard backstop only, in case pool data is itself glitched
-    function trifectaPayoutEstimate(progA, progB, progC) {
+    function trifectaPayoutEstimate(progA, progB, progC, unitStake, ticketTotal) {
       let exactaLeg = getExactaPayout(progA, progB);
       if (exactaLeg === null) return null; // no real 2-leg anchor available yet
       let pA = winProbs[progA] ? winProbs[progA].modelProb : 0;
@@ -2032,7 +2066,10 @@
         ? netTriPool / TRIFECTA_MIN_BASE_UNIT
         : TRIFECTA_PAYOUT_ABSOLUTE_BACKSTOP;
 
-      return Math.min(est, raceSpecificCeiling, TRIFECTA_PAYOUT_ABSOLUTE_BACKSTOP);
+      let capped = Math.min(est, raceSpecificCeiling, TRIFECTA_PAYOUT_ABSOLUTE_BACKSTOP);
+      // The bettor's own money lowers the payout the same way it does for any pool; the trifecta pool total is only known
+      // when the Probables tab has loaded, otherwise this is a no-op.
+      return adjustPayoutForOwnStake(capped, cachedTrifectaPoolTotal, TAKEOUT_RATE, unitStake, ticketTotal);
     }
 
     // Dynamic $2-$6 stake sizing off an edge fraction (0-1), rounded to the nearest stepUnit
@@ -2086,11 +2123,11 @@
       // Conviction (and therefore stake size) comes ONLY from how much of a score outlier the top
       // pick is (its z-score) — never from odds or pool data.
       if (c1) {
-        let realWinPayoutRate = getWinPoolPayout(c1.PROGRAM);
+        let winConviction = computeConviction(winProbs[c1.PROGRAM].zScore);
+        let stake = scaleStake(Math.min(winConviction, 1), 2, 6, 1);
+        let realWinPayoutRate = getWinPoolPayout(c1.PROGRAM, stake); // priced with this stake already in the pool
         if (realWinPayoutRate !== null) {
           let pWin = winProbs[c1.PROGRAM].modelProb;
-          let conviction = computeConviction(winProbs[c1.PROGRAM].zScore);
-          let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
           let payoutIfWin = stake * realWinPayoutRate;
           let ev = pWin * payoutIfWin - stake;
           candidates.push({
@@ -2123,16 +2160,16 @@
           avg: rates.reduce((x, y) => x + y, 0) / rates.length, n: rates.length
         };
       }
-      function placeRateRange(horse) {
+      function placeRateRange(horse, stake) {
         let others = contenders.filter(h => h.PROGRAM !== horse.PROGRAM);
-        return summarizeRates(others.map(o => getPlacePoolPayout(horse.PROGRAM, [o.PROGRAM])));
+        return summarizeRates(others.map(o => getPlacePoolPayout(horse.PROGRAM, [o.PROGRAM], stake)));
       }
-      function showRateRange(horse) {
+      function showRateRange(horse, stake) {
         let others = contenders.filter(h => h.PROGRAM !== horse.PROGRAM);
         let rates = [];
         for (let i = 0; i < others.length; i++) {
           for (let j = i + 1; j < others.length; j++) {
-            rates.push(getShowPoolPayout(horse.PROGRAM, [others[i].PROGRAM, others[j].PROGRAM]));
+            rates.push(getShowPoolPayout(horse.PROGRAM, [others[i].PROGRAM, others[j].PROGRAM], stake));
           }
         }
         return summarizeRates(rates);
@@ -2141,12 +2178,12 @@
       function buildPlaceCandidate(horse) {
         if (!horse || !c3) return;
         let placeEligible = !isNearTie(horse.PROGRAM, c3.PROGRAM); // boundary threat from c3 (gates Option A/B eligibility only)
-        let range = placeRateRange(horse);
+        let conviction = computeConviction(winProbs[horse.PROGRAM].zScore);
+        let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
+        let range = placeRateRange(horse, stake); // priced with this stake already in the pool
         if (range === null) return;
         let pPlace = placeProbabilityOf(horse.PROGRAM);
         if (pPlace <= 0) return;
-        let conviction = computeConviction(winProbs[horse.PROGRAM].zScore);
-        let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
         let ev = pPlace * (stake * range.avg) - stake;
         candidates.push({
           type: 'PLACE', typeLabel: 'Place', horses: `#${horse.PROGRAM}`,
@@ -2164,12 +2201,12 @@
       function buildShowCandidate(horse) {
         if (!horse || !c4) return;
         let showEligible = !isNearTie(horse.PROGRAM, c4.PROGRAM);
-        let range = showRateRange(horse);
+        let conviction = computeConviction(winProbs[horse.PROGRAM].zScore);
+        let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
+        let range = showRateRange(horse, stake); // priced with this stake already in the pool
         if (range === null) return;
         let pShow = showProbabilityOf(horse.PROGRAM);
         if (pShow <= 0) return;
-        let conviction = computeConviction(winProbs[horse.PROGRAM].zScore);
-        let stake = scaleStake(Math.min(conviction, 1), 2, 6, 1);
         let ev = pShow * (stake * range.avg) - stake;
         candidates.push({
           type: 'SHOW', typeLabel: 'Show', horses: `#${horse.PROGRAM}`,
@@ -2196,7 +2233,9 @@
           let edge = Math.max(0, (payout.value - fairPayout) / fairPayout);
           let baseStake = Math.max(baseU, scaleStake(Math.min(edge, 1), 2, 6, baseU));
           let cost = baseStake * 1;
-          let payoutIfHit = payout.value * baseStake;
+          // stake sizing above uses the live probable; the payout the ticket is judged on includes its own money in the pool
+          let ownPay = exactaPayoutEstimate(c1.PROGRAM, c2.PROGRAM, cost, cost);
+          let payoutIfHit = (ownPay ? ownPay.value : payout.value) * baseStake;
           let ev = pOrder * payoutIfHit - cost;
           candidates.push({
             type: 'EXACTA_STRAIGHT', typeLabel: 'Exacta (Straight)', horses: `#${c1.PROGRAM}/#${c2.PROGRAM}`,
@@ -2222,7 +2261,7 @@
           let wheelEligible = !c1c2Tie && c2c3Tie && (nLegs === 3 ? (wants4 && !c4c5Tie) : !wants4);
 
           let legs = wheelHorses.map(h => ({
-            horse: h, p: exactaOrderProb(c1.PROGRAM, h.PROGRAM), pay: exactaPayoutEstimate(c1.PROGRAM, h.PROGRAM)
+            horse: h, p: exactaOrderProb(c1.PROGRAM, h.PROGRAM), pay: exactaPayoutEstimate(c1.PROGRAM, h.PROGRAM, baseU, baseU * wheelHorses.length)
           }));
           let allReal = legs.every(l => l.pay && l.pay.value > 0);
           if (allReal) {
@@ -2264,7 +2303,7 @@
           let pBox = 0, expectedPayout = 0, allReal = true, payValues = [];
           combos.forEach(([a, b]) => {
             let p = exactaOrderProb(a, b);
-            let pay = exactaPayoutEstimate(a, b);
+            let pay = exactaPayoutEstimate(a, b, baseU, cost);
             if (!pay || !pay.isReal) allReal = false;
             pBox += p;
             expectedPayout += p * (pay ? pay.value : 0) * baseU;
@@ -2310,7 +2349,7 @@
           let triPBox = 0, triExpectedPayout = 0, triAllReal = true;
           triCombos.forEach(([a, b, c]) => {
             let p = trifectaOrderProb(a, b, c);
-            let pay = trifectaPayoutEstimate(a, b, c);
+            let pay = trifectaPayoutEstimate(a, b, c, TRIFECTA_MIN_BASE_UNIT, triCost);
             if (pay === null) triAllReal = false;
             triPBox += p;
             triExpectedPayout += p * (pay || 0) * TRIFECTA_MIN_BASE_UNIT;
@@ -2361,13 +2400,13 @@
         if (n === 1) {
           let p0 = legs[0][0];
           if (kindDef.label === 'Win') {
-            let rate = getWinPoolPayout(p0);
+            let rate = getWinPoolPayout(p0, amount);
             if (rate === null) return noData;
             let payout = amount * rate;
             Object.assign(c, { type: 'WIN', typeLabel: 'Win', horses: tag(p0), hitProb: winProbs[p0].modelProb, payoutLow: payout, payoutHigh: payout, ev: winProbs[p0].modelProb * payout - amount });
           } else {
             let isPlace = kindDef.label === 'Place';
-            let range = isPlace ? placeRateRange({ PROGRAM: p0 }) : showRateRange({ PROGRAM: p0 });
+            let range = isPlace ? placeRateRange({ PROGRAM: p0 }, amount) : showRateRange({ PROGRAM: p0 }, amount);
             let pHit = isPlace ? placeProbabilityOf(p0) : showProbabilityOf(p0);
             if (range === null || !(pHit > 0)) return noData;
             Object.assign(c, { type: isPlace ? 'PLACE' : 'SHOW', typeLabel: kindDef.label, horses: tag(p0), hitProb: pHit, payoutLow: amount * range.min, payoutHigh: amount * range.max, ev: pHit * amount * range.avg - amount });
@@ -2402,7 +2441,7 @@
           let unit = amount / combos.length;
           let pHit = 0, expected = 0, pays = [];
           for (let combo of combos) {
-            let pay = isTri ? trifectaPayoutEstimate(combo[0], combo[1], combo[2]) : getExactaPayout(combo[0], combo[1]);
+            let pay = isTri ? trifectaPayoutEstimate(combo[0], combo[1], combo[2], unit, amount) : getExactaPayout(combo[0], combo[1], unit, amount);
             if (pay === null || !(pay > 0)) return noData;
             let p = isTri ? trifectaOrderProb(combo[0], combo[1], combo[2]) : exactaOrderProb(combo[0], combo[1]);
             pHit += p; expected += p * pay * unit; pays.push(pay);
@@ -2913,7 +2952,7 @@
       return tsvRow([raceCells[0], winnerProg, top3Progs].concat(raceCells.slice(1), [
         h.PROGRAM, h.HORSE_NAME.replace(/"/g, ''), h.POST, h.RUN_STYLE, h.RUN_STYLE_PTS,
         numOrBlank(h.ODDS_NUMERIC, 2), (!isNaN(liveDec) && liveDec > 0) ? 'LIVE' : 'ML',
-        numOrBlank(h.C_SPEED, 3), numOrBlank(h.C_POWER, 3), numOrBlank(h.C_CLASS, 3), numOrBlank(h.C_DIST, 3), numOrBlank(h.C_DRIVER, 4),
+        numOrBlank(h.C_SPEED, 3), numOrBlank(h.C_POWER, 3), numOrBlank(h.C_CLASS, 3), numOrBlank(h.C_DRIVER, 4),
         numOrBlank(h.C_TRAINER, 4), numOrBlank(h.C_EARLY, 3), numOrBlank(h.C_FINISH, 3), numOrBlank(h.C_RECENCY, 1), numOrBlank(h.C_MARKET, 3),
         numOrBlank(h.POST_BONUS, 2), numOrBlank(h.STYLE_BONUS, 2), numOrBlank(h.WET_BONUS, 2),
         numOrBlank(h.FINAL_SCORE, 2), h.RANK, numOrBlank(h.Z_SCORE, 3), numOrBlank(h.WIN_PROB, 4), h.IMPUTED_COUNT || 0
@@ -3058,7 +3097,7 @@
     let elapsedSecs = Math.floor((Date.now() - collectionStartTime) / 1000);
     let timeRemaining = Math.max(0, 15 - elapsedSecs);
 
-    let tabListHtml = REQUIRED_TABS.map(tab => {
+    let tabListHtml = getRequiredTabs().map(tab => {
       let isLoaded = loadedTabs[tab];
       let color = isLoaded ? 'var(--ts-green)' : 'var(--ts-red)';
       let icon = isLoaded ? '🟢' : '🔴';
@@ -3233,9 +3272,12 @@
 
     existing.innerHTML = `
       <div style="border-bottom:2px solid var(--ts-border-accent);padding-bottom:8px;margin-bottom:12px;">
-        <div class="ts-row-flex" style="margin-bottom:8px;color:var(--ts-cyan);font-weight:700;font-size:14px;">
-          <span>📍 ${trackDisplay} — RACE #${raceDisplay}${condTag}</span>
-          <span class="ts-muted" style="font-size:11.5px;">📅 ${currentDate}</span>
+        <div class="ts-row-flex" style="margin-bottom:8px;align-items:flex-start;gap:8px;color:var(--ts-cyan);font-weight:700;font-size:14px;">
+          <span style="display:flex;flex-direction:column;gap:2px;">
+            <span>📍 ${trackDisplay} — RACE #${raceDisplay}${condTag}</span>
+            <span class="ts-muted" style="font-size:11.5px;">📅 ${currentDate}</span>
+          </span>
+          <button id="ts-help-btn" title="Open a plain-language guide to how this model works (new tab)" class="ts-btn" style="flex:0 0 auto;font-size:10px;padding:4px 7px;max-width:130px;white-space:normal;line-height:1.25;text-align:center;">❓ How does this extension work?</button>
         </div>
 
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
@@ -3309,19 +3351,19 @@
         <div class="ts-table-wrap">
           <table class="ts-table ts-table-scroll">
             <thead><tr>
-              <th></th><th>Option</th><th>$</th><th>Type</th><th>#</th><th>Est. Payout</th><th>Hit %</th>
+              <th></th><th>Pick</th><th>$</th><th>Type</th><th>#</th><th>Est. Payout</th><th>Hit %</th>
             </tr></thead>
             <tbody>
               ${modelRes.wagerRecs.optionRows.concat(modelRes.wagerRecs.extraRows || []).map(o => o.isPass ? `
                 <tr>
                   <td>${/^No Bet/.test(o.passReason) ? `<input type="checkbox" class="ts-wager-pick" data-wager-key="${NO_BET_KEY_PREFIX}${o.label}" title="Use No Bet as the User Selected Wager" ${userSelectedWagerKey === NO_BET_KEY_PREFIX + o.label ? 'checked' : ''}>` : ''}</td>
-                  <td>${o.label}</td>
+                  <td style="white-space:nowrap;">${OPTION_DISPLAY[o.label] || o.label}</td>
                   <td class="ts-num ts-muted">—</td>
                   <td class="ts-muted" colspan="4">${o.passReason}</td>
                 </tr>` : `
                 <tr>
                   <td><input type="checkbox" class="ts-wager-pick" data-wager-key="${getWagerKey(o.typeLabel, o.horses)}" title="Use as the User Selected Wager" ${getWagerKey(o.typeLabel, o.horses) === userSelectedWagerKey ? 'checked' : ''}></td>
-                  <td>${o.isExtra ? '<span style="color:var(--ts-red);font-weight:700;white-space:nowrap;font-size:11px;">NOT RECOMMENDED</span>' : o.label}</td>
+                  <td>${o.isExtra ? '<span style="color:var(--ts-red);font-weight:700;white-space:nowrap;font-size:11px;">NOT RECOMMENDED</span>' : (OPTION_DISPLAY[o.label] || o.label)}</td>
                   <td class="ts-num">$${o.stake}</td>
                   <td style="white-space:nowrap;">${o.typeLabel}</td>
                   <td style="white-space:nowrap;">${o.horses}</td>
@@ -3449,6 +3491,18 @@
     } catch(e) {}
   }
 
+  // The "How does this extension work?" guide (built from HOW_IT_WORKS.md). Kept inside the script so there is nothing to
+  // host or download; the button writes it into a new tab. Regenerate this string when the guide text changes.
+  const HOW_IT_WORKS_HTML = "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>How the Model Works</title><style>\n:root{--bg:#f4f8fc;--card:#fff;--fg:#1b2a3a;--head:#0b2a4a;--accent:#2f80c9;--soft:#e6f0fa;--line:#c9d6e3;--code:#eef3f8;--note:#fff7e0;--noteb:#e0a800}\n@media (prefers-color-scheme: dark){:root{--bg:#0b1624;--card:#12233a;--fg:#dbe6f2;--head:#9fd0ff;--accent:#4da3ff;--soft:#183253;--line:#2a4468;--code:#0e1c30;--note:#2d2a14;--noteb:#e0a800}}\n*{box-sizing:border-box}\nbody{margin:0;background:var(--bg);color:var(--fg);font-family:'Segoe UI',-apple-system,Arial,sans-serif;font-size:16px;line-height:1.55}\nmain{max-width:860px;margin:0 auto;padding:20px 16px 60px;background:var(--card)}\n@media(min-width:900px){main{margin:24px auto;border-radius:10px;box-shadow:0 4px 24px rgba(0,0,0,.12);padding:28px 36px 60px}}\nh1{font-size:1.7em;color:var(--head);border-bottom:3px solid var(--accent);padding-bottom:8px;margin-top:0}\nh2{font-size:1.2em;color:#fff;background:#0b2a4a;padding:7px 12px;border-radius:5px;margin-top:30px}\nh3{font-size:1.05em;color:var(--head);margin:20px 0 4px}\np{margin:6px 0 8px}\nhr{border:0;border-top:1px solid var(--line);margin:18px 0}\n.tw{overflow-x:auto;margin:10px 0}\ntable{border-collapse:collapse;width:100%;font-size:.88em}\nth{background:var(--soft);color:var(--head);text-align:left}\nth,td{border:1px solid var(--line);padding:5px 8px;vertical-align:top}\ncode{font-family:Consolas,Menlo,monospace;background:var(--code);padding:1px 4px;border-radius:3px;font-size:.88em}\npre{background:var(--code);border-left:4px solid var(--accent);padding:10px 14px;overflow-x:auto}\npre code{background:none;padding:0}\nblockquote{margin:10px 0;padding:6px 14px;background:var(--note);border-left:4px solid var(--noteb)}\nul,ol{margin:6px 0 8px;padding-left:24px}\n</style></head><body><main><h1>How the TwinSpires Handicapping Model Works</h1>\n<p>A plain-language walkthrough of the model, from raw data to a bet recommendation. Written so someone who knows\nhorse racing and basic betting math can follow it without reading the code.</p>\n<blockquote>\n<p>Model version <strong>v2.4</strong>. Every number quoted here is a current setting, not a law. Most are estimates chosen\nby judgment and back-testing and are meant to be tuned as more races are logged.</p>\n</blockquote>\n<hr />\n<h2>1. The 60-second version</h2>\n<ol>\n<li>The extension quietly listens to the data TwinSpires already loads for the race you are viewing (runners,\n   speed/class/pace figures, track stats, live odds, betting pools, exacta probables).</li>\n<li>It turns each horse's figures into <strong>nine component scores</strong>, multiplies each by a <strong>weight</strong>, and adds them into\n   a <strong>base score</strong>.</li>\n<li>It adds small <strong>bonuses</strong> for situational edges (post position, running style, wet track), giving the\n   <strong>final score</strong>. Higher is better.</li>\n<li>It converts the final scores into <strong>win probabilities</strong> (and from those, place / show / exacta / trifecta\n   probabilities).</li>\n<li>It prices <strong>every possible bet</strong> using the real pool and probables money, and computes the <strong>expected value\n   (EV)</strong> of each.</li>\n<li>It <strong>filters out</strong> bets that are too close to call, too low-paying, or too poor in value, and recommends at most\n   two: <strong>Option A (best value)</strong> and <strong>Option B (safest)</strong>. If nothing survives, it says \"No Bet\" and why.</li>\n</ol>\n<p>Two principles run through everything:</p>\n<ul>\n<li><strong>Scores decide who is good. Money decides what to bet.</strong> The model never uses odds to decide who will win\n  (beyond one small input, see section 5). It uses odds and pools only to work out what a winning ticket would pay.</li>\n<li><strong>When unsure, stay out.</strong> Several gates exist purely to refuse bets: near-ties, low payouts, missing data,\n  poor-value bets.</li>\n</ul>\n<hr />\n<h2>2. Pipeline at a glance</h2>\n<pre><code> TwinSpires page loads data\n          |\n          v\n [1] CAPTURE        intercept every JSON response, recognize what it is\n          |\n          v\n [2] CLEAN &amp; HOLD   merge per-horse rows, track scratches, detect race change,\n          |         wait for the data to stop changing\n          v\n [3] SCORE          9 components x weights  -&gt;  base score\n          |         + post bonus + style bonus + wet bonus  -&gt;  FINAL SCORE\n          v\n [4] PROBABILITY    z-score -&gt; softmax -&gt; 15% shrink -&gt; win probability\n          |         Harville -&gt; place / show / exacta / trifecta probability\n          v\n [5] PRICE          takeout + pools + probables -&gt; what each bet would pay\n          |\n          v\n [6] EVALUATE       hit rate x payout - cost = EV, for every bet type\n          |\n          v\n [7] FILTER         near-tie rule, EV floor, payout floor\n          |\n          v\n [8] RECOMMEND      Option A (value), Option B (safety), or &quot;No Bet&quot;\n</code></pre>\n<hr />\n<h2>3. Stage 1 and 2: Getting the data</h2>\n<h3>Capture</h3>\n<p>The script wraps the browser's <code>XMLHttpRequest</code> and <code>fetch</code>. Every JSON response TwinSpires receives is also read\nby the extension. Because field names are not documented, it <strong>recognizes payloads by their shape</strong> (for example,\n\"an array of objects that each have a program number\" is a runner list) rather than by URL or fixed names.</p>\n<p>It recognizes four kinds of payload:</p>\n<div class=\"tw\"><table>\n<thead>\n<tr>\n<th>Payload</th>\n<th>What it gives the model</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>Runners</td>\n<td>Per-horse figures, odds, run style, comments, scratch status, track condition</td>\n</tr>\n<tr>\n<td>Meet/Week stats</td>\n<td>Track bias numbers (speed bias, post-position and run-style \"impact values\")</td>\n</tr>\n<tr>\n<td>Exotics (\"Probables\")</td>\n<td>The live exacta payout grid, exacta and trifecta pool totals</td>\n</tr>\n<tr>\n<td>Pools</td>\n<td>Win / Place / Show money per horse, and pool totals</td>\n</tr>\n</tbody>\n</table></div>\n<p>Some tabs on TwinSpires only send their data when clicked, so the user opens the tabs. A loader panel shows which\nof the eight expected tabs (Summary, Advanced, Speed, Class, Pace, Comments, Pools, Probables) have arrived. Harness races\nhave no Summary tab on TwinSpires, so for harness the Summary tab is not waited on or listed (seven tabs).</p>\n<h3>Safeguards against bad data</h3>\n<ul>\n<li><strong>Stale responses are dropped.</strong> Each request gets a sequence number; if an older response for the same\n  endpoint arrives after a newer one, it is ignored.</li>\n<li><strong>Wrong-race payloads are dropped.</strong> If a runner or stats payload names a different race number than the page\n  URL, it is ignored (this fixed horse names flipping between races).</li>\n<li><strong>Race change resets everything.</strong> When the track or race number changes, all cached data is cleared so one\n  race never contaminates the next.</li>\n<li><strong>Merging, not overwriting.</strong> A later payload can fill in blanks but a real value is not overwritten by an empty\n  one. Once a horse is marked scratched, it stays scratched.</li>\n<li><strong>Stability window.</strong> The scores are not shown as final until the scoring fields have held steady for about\n  6 seconds, because TwinSpires keeps streaming small updates after a tab loads.</li>\n</ul>\n<hr />\n<h2>4. Stage 3a: The raw inputs per horse</h2>\n<div class=\"tw\"><table>\n<thead>\n<tr>\n<th>Field</th>\n<th>Meaning</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td><code>PRM_PWR</code></td>\n<td>Prime Power rating</td>\n</tr>\n<tr>\n<td><code>AVG_SPD</code>, <code>SPD_LR</code>, <code>AVG_DIST_SPD</code></td>\n<td>Speed figures: average, last race, average at today's distance/surface (the best and best-at-distance figures are still read but no longer used in the score)</td>\n</tr>\n<tr>\n<td><code>AVG_CLS</code>, <code>LAST_CLS</code></td>\n<td>Class ratings: average and last race</td>\n</tr>\n<tr>\n<td><code>W_JKY</code>, <code>W_TRN</code></td>\n<td>Jockey and trainer win percentages</td>\n</tr>\n<tr>\n<td><code>E1</code>, <code>E2</code></td>\n<td>Early pace figures (first call, second call)</td>\n</tr>\n<tr>\n<td><code>LP</code></td>\n<td>Late pace figure</td>\n</tr>\n<tr>\n<td><code>DAYS_OFF</code></td>\n<td>Days since last race</td>\n</tr>\n<tr>\n<td>Odds</td>\n<td>Live odds (preferred) or morning line</td>\n</tr>\n<tr>\n<td><code>RUN_STYLE</code>, <code>RUN_STYLE_PTS</code></td>\n<td>Running style (E, E/P, P, S) and its speed-point strength (0 to 8)</td>\n</tr>\n<tr>\n<td><code>POST</code></td>\n<td>Post position</td>\n</tr>\n</tbody>\n</table></div>\n<h3>Handling missing data</h3>\n<p>Real data has holes, so this is done deliberately:</p>\n<ul>\n<li><strong>A few horses are missing a figure:</strong> the gap is filled with the <strong>field average</strong> for that figure. This keeps\n  one missing number from wrecking a horse's score, and keeps the horse neutral rather than penalized.</li>\n<li><strong>The entire field is missing a figure:</strong> nothing is invented. Every horse scores 0 for that component. This\n  intentionally drags all scores down, which triggers the low-data warning (section 9).</li>\n</ul>\n<hr />\n<h2>5. Stage 3b: The base score</h2>\n<p>Each horse gets nine <strong>components</strong>, each built from the raw inputs. Some blend two inputs; some have fallbacks if\nthe preferred input is missing.</p>\n<div class=\"tw\"><table>\n<thead>\n<tr>\n<th>Component</th>\n<th>How it is built</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td><strong>Speed</strong></td>\n<td>70% average speed at this distance/surface + 30% last-race speed. If only one exists, use it. If neither, fall back to overall average speed. This already carries the distance/surface figure, so there is no separate Distance component</td>\n</tr>\n<tr>\n<td><strong>Power</strong></td>\n<td>Prime Power, as is</td>\n</tr>\n<tr>\n<td><strong>Class</strong></td>\n<td>Average class; if missing, last-race class</td>\n</tr>\n<tr>\n<td><strong>Driver</strong></td>\n<td>Jockey win %, as percentage points (14, not 0.14)</td>\n</tr>\n<tr>\n<td><strong>Trainer</strong></td>\n<td>Trainer win %, as percentage points (14, not 0.14)</td>\n</tr>\n<tr>\n<td><strong>Early</strong></td>\n<td>Average of E1 and E2 (or whichever one exists)</td>\n</tr>\n<tr>\n<td><strong>Finish</strong></td>\n<td>Late pace (LP)</td>\n</tr>\n<tr>\n<td><strong>Recency</strong></td>\n<td>A step function of days off: 14-45 days = 100, under 14 = 85, 46-90 = 70, over 90 = 50, unknown = 75</td>\n</tr>\n<tr>\n<td><strong>Market</strong></td>\n<td>The odds-implied probability, <code>1 / (odds + 1) x 100</code>, using live odds if present, else morning line</td>\n</tr>\n</tbody>\n</table></div>\n<p>The <strong>base score</strong> is the weighted sum of the nine components:</p>\n<pre><code>base = Speed x W_Speed + Power x W_Power + Class x W_Class\n     + Driver x W_Driver + Trainer x W_Trainer + Early x W_Early + Finish x W_Finish\n     + Recency x W_Recency + Market x W_Market\n</code></pre>\n<h3>The weights</h3>\n<p>Different breeds are won in different ways, so each has its own weight set:</p>\n<div class=\"tw\"><table>\n<thead>\n<tr>\n<th>Weight</th>\n<th>Thoroughbred</th>\n<th>Harness</th>\n<th>Quarter Horse</th>\n<th><strong>Special</strong> (Thoroughbred, selected tracks)</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>Speed</td>\n<td>0.28</td>\n<td>0.20</td>\n<td>0.28</td>\n<td>0.25</td>\n</tr>\n<tr>\n<td>Power</td>\n<td>0.09</td>\n<td>0.07</td>\n<td>0.10</td>\n<td>0.08</td>\n</tr>\n<tr>\n<td>Class</td>\n<td>0.16</td>\n<td>0.13</td>\n<td>0.09</td>\n<td>0.15</td>\n</tr>\n<tr>\n<td>Driver</td>\n<td>0.04</td>\n<td>0.16</td>\n<td>0.05</td>\n<td>0.04</td>\n</tr>\n<tr>\n<td>Trainer</td>\n<td>0.07</td>\n<td>0.05</td>\n<td>0.06</td>\n<td>0.08</td>\n</tr>\n<tr>\n<td>Early pace</td>\n<td>0.15</td>\n<td>0.18</td>\n<td>0.34</td>\n<td>0.14</td>\n</tr>\n<tr>\n<td>Finish (late pace)</td>\n<td>0.10</td>\n<td>0.08</td>\n<td>0.00</td>\n<td>0.11</td>\n</tr>\n<tr>\n<td>Recency</td>\n<td>0.03</td>\n<td>0.04</td>\n<td>0.02</td>\n<td>0.03</td>\n</tr>\n<tr>\n<td>Market</td>\n<td>0.03</td>\n<td>0.03</td>\n<td>0.03</td>\n<td>0.09</td>\n</tr>\n</tbody>\n</table></div>\n<p>Reading the table: harness leans on the driver and early speed; quarter horses are mostly early speed and raw speed\n(late pace is ignored).</p>\n<p>A separate Distance component was removed: it was almost the same number as Speed (a 0.97 correlation, since Speed already\nblends in the distance/surface speed figure), so it was double counting. Its old weight was added to Speed as a stand-in until\nthe weights are fitted.</p>\n<p><strong>Special weights</strong> are used only for <strong>Thoroughbred races at Churchill Downs and Horseshoe Indianapolis</strong>. They\ndiffer mainly by trusting the market more (Market weight 0.09 vs 0.03). This list is <strong>hardcoded on purpose</strong>.\nIt is never decided from live data such as pool size, because pool totals can nearly double in the final minute\nbefore post, which would silently flip the weight set after someone had already decided on a bet. A track is only\nadded after it has been tested independently.</p>\n<h3>Why the weights do not sum to exactly 1.0</h3>\n<p>The sets sum to about 0.94 to 0.97. This does not matter, because the next stage converts scores to\n<strong>relative standing within the field</strong> (z-scores). A uniform scale change has no effect on the outcome. What matters is the\n<em>proportion</em> between weights.</p>\n<p>The weights are <strong>not fitted to results yet</strong>; they are judgment-based starting values. Components also spread horses\napart by different amounts (class figures are bunched tightly, market odds are not), so a weight is not the same thing as\nthat component's real influence on the ranking. Driver and trainer win rates are converted to percentage points before\nweighting so they sit on a comparable scale to the other figures; even so, their influence is modest.</p>\n<hr />\n<h2>6. Stage 3c: Bonuses (the \"on top of the score\" layer)</h2>\n<p>Three small, capped adjustments are added to the base score to get the <strong>final score</strong>. They use <strong>track-bias data</strong>\nfrom the Meet and Week stats on TwinSpires.</p>\n<h3>6.1 Which stats to trust: Week vs Meet</h3>\n<p>Bias data comes in two flavors, this week and the whole meet. A short week is noisy, so they are blended by sample\nsize:</p>\n<div class=\"tw\"><table>\n<thead>\n<tr>\n<th>Races this week</th>\n<th>Blend used</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>15 or more</td>\n<td>65% Week, 35% Meet</td>\n</tr>\n<tr>\n<td>7 to 14</td>\n<td>20% Week, 80% Meet</td>\n</tr>\n<tr>\n<td>Fewer than 7</td>\n<td>100% Meet</td>\n</tr>\n</tbody>\n</table></div>\n<h3>6.2 Is there enough meet data at all?</h3>\n<p>Bonuses are skipped entirely if the meet has <strong>fewer than 15 races</strong> of data. Early-pace weight changes also scale\nwith meet size (see 6.3).</p>\n<h3>6.3 Speed-bias adjustment (changes a weight, not a bonus)</h3>\n<p>If the track is playing strongly to speed (blended speed bias above 0.55), the <strong>Early weight is increased</strong> for\nthis race: <code>W_Early += (bias - 0.55) x 0.5</code>, scaled down for small meet samples (0% under 6 races, 10% from 6 to 15,\n100% above 15). A speed-favoring track therefore makes early pace count for more in everyone's score.</p>\n<h3>6.4 Post-position bonus</h3>\n<p>Posts are grouped: <strong>Rail</strong> (1), <strong>1-3</strong>, <strong>4-7</strong>, <strong>8+</strong>. The track's \"impact value\" for the horse's group (1.00 is\nneutral) becomes a bonus <strong>only if it is meaningfully above neutral (at least 1.03)</strong>. Bonus = <code>(IV - 1) x 6</code> (7 for\nharness, 4 for quarter horse), capped at <strong>+5 points</strong>. Post positions that underperform get no penalty, only the\nabsence of a bonus.</p>\n<h3>6.5 Running-style bonus</h3>\n<p>Same idea using the run-style group (E, E/P, P, S): <code>(IV - 1) x 6</code> (7 harness, 5 QH), capped at <strong>+5</strong>, then scaled by\nhow strong the horse's style actually is (its speed points divided by 8, limited to 0 to 1). A horse barely\nfitting \"E\" gets only a fraction of the bonus.</p>\n<h3>6.6 Wet-track bonus</h3>\n<p>Today's track condition is sorted into a wetness tier:</p>\n<div class=\"tw\"><table>\n<thead>\n<tr>\n<th>Tier</th>\n<th>Conditions</th>\n<th>Max bonus</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>0</td>\n<td>Fast, firm, good, etc.</td>\n<td>none</td>\n</tr>\n<tr>\n<td>1</td>\n<td>Yielding, soft</td>\n<td>+0.75</td>\n</tr>\n<tr>\n<td>2</td>\n<td>Sloppy, muddy, heavy, wet</td>\n<td>+1.5</td>\n</tr>\n</tbody>\n</table></div>\n<p>The bonus is scaled by running style (E = 100%, E/P = 65%, P = 25%, S = 0%) and by speed-point strength. Rationale:\non wet tracks, front-runners tend to benefit. This bonus <strong>stacks on top</strong> of the style bonus because it comes from\na different source (today's condition rather than the meet's historical stats).</p>\n<h3>6.7 Final score</h3>\n<pre><code>FINAL SCORE = base + post bonus + style bonus + wet bonus\n</code></pre>\n<p>Scratched horses are forced to a score of 0 at the very end and excluded from everything below.</p>\n<hr />\n<h2>7. Stage 4: From score to probability</h2>\n<p>Scores rank the horses; <strong>probabilities</strong> are needed to put a price on a bet.</p>\n<ol>\n<li><strong>Standardize.</strong> For the live (non-scratched) field, compute each horse's z-score: how many standard deviations\n   above or below the field average it is. Capped at +/-2.5 so one outlier cannot dominate.</li>\n<li><strong>Softmax.</strong> <code>weight = exp(0.70 x z)</code>, then divide each by the field total so they sum to 100%. The <code>0.70</code>\n   (<code>SCORE_PROB_K</code>) sets how sharply a score lead turns into a probability lead.</li>\n<li><strong>Shrink 15% toward an even split.</strong> <code>final = 0.85 x model + 0.15 x (1 / field size)</code>. The model cannot see most of\n   what decides a race (trips, pace scenarios, workouts, equipment, luck), so its raw confidence overstates reality.\n   This one blend makes every downstream number less confident at once.</li>\n</ol>\n<p>Not used here: <strong>live odds are deliberately not blended into win probability.</strong> The score already contains a small\nmarket component (section 5); blending odds in again would count the market twice.</p>\n<h3>Extending to place / show / exacta / trifecta (Harville)</h3>\n<p>The Harville formula assumes that, once a horse is removed, everyone else's chances scale up proportionally:</p>\n<ul>\n<li>Exacta A over B: <code>P(A) x P(B) / (1 - P(A))</code></li>\n<li>Trifecta A-B-C: <code>P(A) x P(B)/(1-P(A)) x P(C)/(1-P(A)-P(B))</code></li>\n<li><strong>Place</strong> (top 2) and <strong>Show</strong> (top 3): the sum of every way that horse can finish in those spots</li>\n</ul>\n<p>These probabilities are the <strong>hit rates</strong> that appear everywhere on the panel.</p>\n<hr />\n<h2>8. Stage 5 and 6: Pricing every bet</h2>\n<p>Every payout comes from <strong>real money in the pools</strong>, not a guessed formula. If the needed pool or probables data has\nnot loaded, that bet is simply not generated.</p>\n<h3>Takeout</h3>\n<p>The track keeps a cut of every pool. The model backs the actual takeout out of the win pool using the displayed\nodds (median across horses, accepted if between 10% and 30%). Otherwise it uses a default 18%. Place and show reuse\nthe same figure.</p>\n<h3>How each bet type is priced</h3>\n<div class=\"tw\"><table>\n<thead>\n<tr>\n<th>Bet</th>\n<th>Payout method</th>\n<th>Probability</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td><strong>Win</strong></td>\n<td><code>(win pool x (1 - takeout)) / $ bet on that horse</code></td>\n<td>Win probability</td>\n</tr>\n<tr>\n<td><strong>Place / Show</strong></td>\n<td>Pari-mutuel split: each placing horse's stake is returned, the leftover profit is split <em>equally</em> among the placers, then divided by that horse's own stake. This is why a heavy favorite pays less than a longshot even when both place. Because <em>who else places</em> is unknown, it is priced for every plausible partner set among the model's top 5. The worst case is used for the payout floor, the best case is displayed, and the <strong>average</strong> is used for EV</td>\n<td>Place / Show probability</td>\n</tr>\n<tr>\n<td><strong>Exacta</strong> (straight, wheel, box)</td>\n<td>The <strong>real payouts from the Probables grid</strong>, per combination</td>\n<td>Harville exacta probability per combination, summed across the ticket</td>\n</tr>\n<tr>\n<td><strong>Trifecta box</strong></td>\n<td><strong>A hybrid, the roughest estimate.</strong> Take the real exacta payout for the first two horses and scale it by the model's probability for the third. It is capped by a ceiling derived from the pool size. Low and high estimates are +/-40% of the expected payout</td>\n<td>Harville trifecta probability, summed across all orderings</td>\n</tr>\n</tbody>\n</table></div>\n<h3>Your own bet is counted in the pool</h3>\n<p>A displayed payout reflects the pool as it is <em>without</em> your wager. Placing a bet adds your stake to the pool and to\nyour horse's (or combination's) money, which lowers the real payout. So every bet line is re-priced with <strong>its own\nstake added</strong>: a $6 bet in a $4,000 pool is priced as if the pool were $4,006, and a $250 custom wager is priced as if\nit were $4,250. Each line uses its own stake and bet type.</p>\n<ul>\n<li><strong>Win / Place / Show:</strong> the stake is added to the pool and to that horse's money before the payout is worked out.</li>\n<li><strong>Exacta and trifecta:</strong> the combination's existing money is backed out of the displayed payout, then each combination\n  gets its share of the ticket while the whole ticket total is added to the pool.</li>\n<li>For a small bet in a large pool the change is tiny. It matters when a bet is a real share of the pool, such as a larger\n  custom wager or a small track. Pool movement before post and breakage are not modeled.</li>\n</ul>\n<h3>Expected value</h3>\n<pre><code>EV = (hit probability x payout if it hits) - cost\nEV per $1 = EV / cost\n</code></pre>\n<p>EV per dollar is the main yardstick for comparing bets of different sizes and types.</p>\n<h3>How much to bet (stake sizing)</h3>\n<p>Stakes are limited to <strong>$2 to $6</strong> for single/exacta bets (trifecta boxes have their own $12 ceiling and 50-cent\nbase unit assumption):</p>\n<ul>\n<li><strong>Win / Place / Show:</strong> stake grows with the horse's <em>conviction</em>, which is how far its z-score sits above a\n  \"typical leader\" level of 1.3 (up to a ceiling of 2.5). Reason: the best horse in any field naturally looks about\n  1 to 1.5 standard deviations above average just from ranking statistics, so only a clearly above-typical leader\n  earns more than the $2 minimum.</li>\n<li><strong>Exacta straight:</strong> stake scales with the <em>edge</em> of the live payout versus what the model thinks is fair.</li>\n<li><strong>Wheels, boxes:</strong> fixed at the base unit times the number of combinations.</li>\n</ul>\n<p>Stake size never comes from odds or pool size.</p>\n<p><strong>Custom amounts.</strong> The extension assumes the user bets conservatively with relatively small wagers. While the automatic\nwager options will be within $2 and $6 (up to $12 for trifectas), there is an option to type in a custom amount on the\ncustom wager line. This will calculate your estimated payout using the custom amount and whichever horses you select,\nincluding the effect of your own stake on the pool (see \"Your own bet is counted in the pool\" above).</p>\n<hr />\n<h2>9. Stage 7 and 8: Filtering and the final recommendation</h2>\n<h3>9.1 Candidate list</h3>\n<p>On every race the engine builds <strong>every</strong> candidate it has data for: Win, Place (top 2 horses), Show (top 3 horses),\nExacta Straight, Exacta Wheel (3 and 4 horses), Exacta Box (2 and 3), Trifecta Box (3 and 4).</p>\n<h3>9.2 Eligibility: the near-tie rule</h3>\n<p>A bet is only <em>eligible</em> for recommendation when the model sees a clear dividing line between the horses the ticket\n<strong>includes</strong> and the horses it <strong>leaves out</strong>. Two horses are \"near-tied\" when the weaker one's win probability\nis at least <strong>75%</strong> of the stronger one's (using the pre-shrink probabilities).</p>\n<p>The <strong>boundary rule</strong>: <em>the first horse the bet does not cover must not be near-tied with the weakest horse it does cover.</em></p>\n<div class=\"tw\"><table>\n<thead>\n<tr>\n<th>Bet</th>\n<th>Must NOT be near-tied</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>Win</td>\n<td>#2 vs #1</td>\n</tr>\n<tr>\n<td>Place on a horse</td>\n<td>#3 vs that horse</td>\n</tr>\n<tr>\n<td>Show on a horse</td>\n<td>#4 vs that horse</td>\n</tr>\n<tr>\n<td>Exacta straight</td>\n<td>#3 vs #2 (and #2 vs #1)</td>\n</tr>\n<tr>\n<td>Exacta box (2)</td>\n<td>#3 vs #2</td>\n</tr>\n<tr>\n<td>Exacta box (3)</td>\n<td>#4 vs #3</td>\n</tr>\n<tr>\n<td>Wheel (3 horses)</td>\n<td>#4 vs #3</td>\n</tr>\n<tr>\n<td>Wheel (4 horses)</td>\n<td>#5 vs #4</td>\n</tr>\n<tr>\n<td>Trifecta box (3 / 4)</td>\n<td>#4 vs #3 / #5 vs #4</td>\n</tr>\n</tbody>\n</table></div>\n<p>Straights/wheels need the top horse to stand clear of the rest. Boxes are meant for when the top horses <em>are</em>\nclose, so the two families are mutually exclusive by design.</p>\n<h3>9.3 Value gates</h3>\n<p>From the eligible bets, only those passing <strong>both</strong> survive:</p>\n<ul>\n<li><strong>EV per $1 of at least -15%.</strong> Slightly negative on purpose: racing is high variance, and a high-hit-rate bet with\n  a small modeled shortfall is acceptable. Setting this to 0 would require strictly positive EV.</li>\n<li><strong>Payout floor of 1.4x.</strong> Even the <em>worst-case</em> payout must be at least 1.4x the stake. This screens out bets that\n  are technically fine on EV but only return pennies of profit (heavy favorites to place or show).</li>\n<li><strong>Trifecta only:</strong> also needs a modeled hit rate of at least 8% and a live trifecta pool.</li>\n</ul>\n<h3>9.4 Picking the Value Pick (A) and Safety Pick (B)</h3>\n<ul>\n<li><strong>Value Pick (Option A):</strong> the surviving bet with the highest EV per dollar.</li>\n<li><strong>Safety Pick (Option B):</strong> the surviving bet with the highest hit rate, of a <em>different bet type</em> than the Value Pick.</li>\n</ul>\n<p>These are the first two rows of the Wager Recommendations table, labeled \"Value Pick\" and \"Safety Pick\".</p>\n<h3>9.5 \"No Bet\" outcomes</h3>\n<div class=\"tw\"><table>\n<thead>\n<tr>\n<th>Message</th>\n<th>Meaning</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td><strong>No Bet - Too Close</strong></td>\n<td>No bet passed the near-tie rule at all (the field is too evenly matched, or data is missing)</td>\n</tr>\n<tr>\n<td><strong>No Bet - Low Payout</strong></td>\n<td>Eligible bets existed, but none cleared the EV floor or the 1.4x payout floor</td>\n</tr>\n</tbody>\n</table></div>\n<h3>9.6 Everything else on the screen</h3>\n<ul>\n<li><strong>NOT RECOMMENDED rows:</strong> the best candidate of every bet type <em>not</em> used by Option A/B, shown for reference\n  with <strong>all filters ignored</strong>. A way to see the engine's best version of each ticket.</li>\n<li><strong>Custom wager row:</strong> the user types an amount, picks a bet type and horses, and the engine prices it with the\n  same formulas. It is never part of Option A/B.</li>\n</ul>\n<p>All generated bet options are built from the horses the model ranks highest for that bet type, and only the ones that\n  pass a strict value gate are recommended. The gates assume the user doesn't want to risk money for less than <strong>1.4 times\n  their stake</strong> back in the worst case, and doesn't want a bet whose expected value is worse than <strong>-15% per dollar</strong>.\n  Using the custom wager line, you can calculate probability and payouts for any horse that is not scratched, not just\n  those the model designates as good value. The custom line shows the numbers but does not apply the value gate, so it\n  will price a poor-value bet just as readily as a good one.\n- <strong>Low-data warning:</strong> if the highest active score is under 60 (but above 0), a red box warns that whole scoring\n  columns are probably missing (for example, a field of first-time starters). It is a warning only; it does not\n  change any score or block any bet.\n- <strong>Change arrows:</strong> a rank or score change is highlighted for 20 seconds so late shifts (odds moves, scratches)\n  are noticed.\n- <strong>Comments panel:</strong> the TwinSpires positive and negative comments for the top five horses, for human judgment.\n  The model does not read them.</p>\n<hr />\n<h2>10. Settings that can be tuned</h2>\n<div class=\"tw\"><table>\n<thead>\n<tr>\n<th>Setting</th>\n<th>Value</th>\n<th>Effect</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>Component weights</td>\n<td>section 5</td>\n<td>How much each figure counts</td>\n</tr>\n<tr>\n<td><code>SCORE_PROB_K</code></td>\n<td>0.70</td>\n<td>How sharply score gaps become probability gaps</td>\n</tr>\n<tr>\n<td><code>PROB_SHRINK</code></td>\n<td>0.15</td>\n<td>How far probabilities are pulled toward an even split</td>\n</tr>\n<tr>\n<td><code>NEAR_TIE_PROB_RATIO</code></td>\n<td>0.75</td>\n<td>How close counts as \"tied\"</td>\n</tr>\n<tr>\n<td><code>MIN_EV_PER_DOLLAR</code></td>\n<td>-0.15</td>\n<td>Minimum acceptable value per dollar</td>\n</tr>\n<tr>\n<td><code>MIN_PAYOUT_RATIO</code></td>\n<td>1.4</td>\n<td>Minimum worst-case payout vs stake</td>\n</tr>\n<tr>\n<td><code>BASELINE_Z</code> / <code>MAX_Z_REF</code></td>\n<td>1.3 / 2.5</td>\n<td>Conviction range that drives $2 to $6 stakes</td>\n</tr>\n<tr>\n<td><code>TAKEOUT_RATE</code></td>\n<td>0.18</td>\n<td>Fallback takeout</td>\n</tr>\n<tr>\n<td><code>MIN_TRIFECTA_HIT_PROB</code></td>\n<td>0.08</td>\n<td>Trifecta-only hit-rate floor</td>\n</tr>\n<tr>\n<td><code>MAX_TRIFECTA_STAKE</code></td>\n<td>12</td>\n<td>Trifecta spend ceiling</td>\n</tr>\n<tr>\n<td><code>TRIFECTA_MIN_BASE_UNIT</code></td>\n<td>0.50</td>\n<td>Assumed minimum trifecta wager</td>\n</tr>\n<tr>\n<td><code>FIELD_STABILITY_WINDOW_MS</code></td>\n<td>6000</td>\n<td>How long data must be steady before it is final</td>\n</tr>\n</tbody>\n</table></div>\n<p>All of these are estimates, not yet calibrated on a large sample.</p>\n<hr />\n<h2>11. What the model does not do (read this before trusting it)</h2>\n<ul>\n<li><strong>It does not see the race.</strong> No trip notes, pace scenario, workouts, equipment, bias on the day beyond the\n  track's stats, or intent. Comments are shown to a human, but they do not enter the score.</li>\n<li><strong>Hit rates are modeled, not measured.</strong> Harville probabilities are a standard simplification and are known to\n  over-state second and third place chances for favorites. The shrink partly offsets this, but absolute hit percentages\n  are not yet validated against results.</li>\n<li><strong>Trifecta payouts are the roughest estimate</strong> (hybrid of a real exacta payout and a modeled third leg). The\n  own-stake pool adjustment for exacta and trifecta tickets is also approximate.</li>\n<li><strong>Place/show payouts depend on who else places.</strong> It prices across the top-5 co-placers; a co-placer outside the\n  top five is not modeled.</li>\n<li><strong>Garbage in, garbage out.</strong> If a whole race has missing figures, scores collapse and the model can only warn you.</li>\n<li><strong>Weights are judgment-based, not fitted yet.</strong> The Special weights exist for two tracks because they tested better,\n  not because of an established reason; do not extend them without logged evidence.</li>\n<li><strong>Odds move.</strong> Everything is computed from live money at that instant and re-computed as it changes; a bet that\n  looks good at 10 minutes to post may not at post time.</li>\n</ul>\n<hr />\n<h2>12. Glossary</h2>\n<ul>\n<li><strong>EV (expected value):</strong> the average profit per bet if it were placed many times, using the model's hit rate.</li>\n<li><strong>Harville:</strong> formula that turns win probabilities into probabilities for exact finishing orders.</li>\n<li><strong>IV (impact value):</strong> a track-stats figure where 1.00 is neutral and above 1.00 means that group wins more than its share.</li>\n<li><strong>Near-tie:</strong> two horses whose win probabilities are within 25% of each other.</li>\n<li><strong>Pari-mutuel:</strong> betting system where all bets form a pool, the track takes a cut, and winners split the rest.</li>\n<li><strong>Probables:</strong> the live grid of what each exacta combination would pay right now.</li>\n<li><strong>Takeout:</strong> the percentage of each pool the track and state keep before paying winners.</li>\n<li><strong>z-score:</strong> how many standard deviations a value is above or below the group average.</li>\n</ul></main></body></html>";
+
+  function openHowItWorks() {
+    let w = window.open('', '_blank');
+    if (!w) { alert('Your browser blocked the new tab. Allow pop-ups for this site and try again.'); return; }
+    w.document.open();
+    w.document.write(HOW_IT_WORKS_HTML);
+    w.document.close();
+  }
+
   const origOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url) {
     let seq = ++requestSeqCounter;
@@ -3476,5 +3530,5 @@
   applyLeftAlignmentCSS();
   applyOverlayThemeCSS();
   updateOverlay();
-  console.log("Live Handicapping Model v2.3 Running - Scratched horses zeroed post-calculation!");
+  console.log("Live Handicapping Model v2.4 Running - Scratched horses zeroed post-calculation!");
 })();
