@@ -17,3 +17,5 @@ Instructions for iPhone (mobile):
 -> open safari, go to twinspires.com, then log in
 -> press the puzzle piece icon next to the safari search bar
 -> you should see the extension from Userscripts here and you'll be able to run the program. 
+
+There is a pdf document called "How_The_Model_Works" that walks through what calculations, etc. this extension does in real time. It's much easier to read and understand than the code itself.
